@@ -349,6 +349,9 @@ class MotionExecutorNode(Node):
             response.message = message + '抓取失败：夹爪闭合到底，未夹住物体'
             return response
 
+        # 抬升与搬运全程保持夹持力矩（力控指令需持续有效，否则物体会在加速阶段滑落）
+        self.gripper.hold_closing()
+
         # ---- 5) 垂直直线抬升 + 滑落检测（必须走直线，否则路径绕行会把物体拖掉）----
         ok, reason = self.moveit.move_cartesian(
             [lift_pose], velocity=self.cartesian_velocity, max_step=0.003, timeout=40.0
