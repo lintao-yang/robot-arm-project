@@ -1,0 +1,323 @@
+<?xml version="1.0" ?>
+<!--
+  桌面 RGB-D 视觉闭环分拣仿真世界（Gazebo Sim / Ignition Fortress 版）
+
+  设计约定：
+    * 坐标系约定：world 原点 = 机械臂底座中心，桌面上表面 z = 0
+    * 相机安装位姿必须与 sorting_bringup/config/system.yaml 的 camera.mount_pose
+      保持一致，以保证视觉外参（scene_manager 广播的 world -> camera_optical_frame）成立
+    * 物理使用 Gazebo Sim 默认的 DART 求解器（接触质量优于 Classic 的 ODE）
+    * 分拣箱为世界文件中的静态模型
+    * 相机使用 Gazebo Sim 的 rgbd_camera 传感器，经 ros_gz_bridge 桥接到 ROS 话题
+-->
+<sdf version="1.9">
+  <world name="sorting_world">
+
+    <!-- ================= 系统插件 ================= -->
+    <plugin filename="ignition-gazebo-physics-system"
+            name="ignition::gazebo::systems::Physics"/>
+    <plugin filename="ignition-gazebo-user-commands-system"
+            name="ignition::gazebo::systems::UserCommands"/>
+    <plugin filename="ignition-gazebo-scene-broadcaster-system"
+            name="ignition::gazebo::systems::SceneBroadcaster"/>
+    <!-- 传感器渲染：GUI 在本机需配合 LIBGL_ALWAYS_SOFTWARE=1（软件渲染）使用 -->
+    <plugin filename="ignition-gazebo-sensors-system"
+            name="ignition::gazebo::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
+    <!-- ================= 光照 ================= -->
+    <!-- 主光源：包在 model 内，便于 scene_manager 通过 set_pose 做域随机化 -->
+    <model name="main_light">
+      <static>true</static>
+      <pose>0 0 3.0 0 0.9 0</pose>
+      <light type="directional" name="sun">
+        <cast_shadows>true</cast_shadows>
+        <pose>0 0 0 0 0 0</pose>
+        <diffuse>0.95 0.95 0.92 1</diffuse>
+        <specular>0.25 0.25 0.25 1</specular>
+        <attenuation>
+          <range>30</range>
+          <constant>0.9</constant>
+          <linear>0.01</linear>
+          <quadratic>0.001</quadratic>
+        </attenuation>
+        <direction>-0.4 0.2 -0.9</direction>
+      </light>
+    </model>
+
+    <!-- 补光：降低阴影对比度，避免暗部目标漏检 -->
+    <model name="fill_light">
+      <static>true</static>
+      <pose>0 0 2.5 0 0 0</pose>
+      <light type="directional" name="fill">
+        <cast_shadows>false</cast_shadows>
+        <pose>0 0 0 0 0 0</pose>
+        <diffuse>0.35 0.36 0.40 1</diffuse>
+        <specular>0.05 0.05 0.05 1</specular>
+        <direction>0.5 -0.5 -0.8</direction>
+      </light>
+    </model>
+
+    <!-- ================= 地面 ================= -->
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <plane><normal>0 0 1</normal><size>6 6</size></plane>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <plane><normal>0 0 1</normal><size>6 6</size></plane>
+          </geometry>
+          <material>
+            <ambient>0.5 0.5 0.5 1</ambient>
+            <diffuse>0.5 0.5 0.5 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ================= 机械臂底座 ================= -->
+    <model name="robot_pedestal">
+      <static>true</static>
+      <pose>0 0 -0.40 0 0 0</pose>
+      <link name="pedestal">
+        <visual name="visual">
+          <geometry><box><size>0.24 0.24 0.80</size></box></geometry>
+          <material>
+            <ambient>0.3 0.3 0.3 1</ambient>
+            <diffuse>0.3 0.3 0.3 1</diffuse>
+          </material>
+        </visual>
+        <collision name="collision">
+          <geometry><box><size>0.24 0.24 0.80</size></box></geometry>
+        </collision>
+      </link>
+    </model>
+
+    <!-- ================= 桌面（上表面 z = 0） ================= -->
+    <model name="work_table">
+      <static>true</static>
+      <pose>0.47 0 -0.025 0 0 0</pose>
+      <link name="table_top">
+        <visual name="visual">
+          <geometry><box><size>0.70 0.80 0.05</size></box></geometry>
+          <material>
+            <ambient>0.72 0.72 0.72 1</ambient>
+            <diffuse>0.72 0.72 0.72 1</diffuse>
+          </material>
+        </visual>
+        <collision name="collision">
+          <geometry><box><size>0.70 0.80 0.05</size></box></geometry>
+        </collision>
+      </link>
+    </model>
+
+    <!-- ================= 4 个分拣箱（静态） ================= -->
+    <!-- 几何与 scene_manager._bin_sdf 一致：外径 0.16，壁厚 0.008，壁高 0.03，底板厚 0.008 -->
+    <model name="bin_zone_a">
+      <static>true</static>
+      <pose>0.66 -0.27 0 0 0 0</pose>
+      <link name="bin">
+        <visual name="bottom"><pose>0 0 0.004 0 0 0</pose>
+          <geometry><box><size>0.16 0.16 0.008</size></box></geometry>
+          <material><ambient>0.85 0.12 0.12 1</ambient><diffuse>0.85 0.12 0.12 1</diffuse></material>
+        </visual>
+        <visual name="wall_py"><pose>0 0.076 0.023 0 0 0</pose>
+          <geometry><box><size>0.16 0.008 0.03</size></box></geometry>
+          <material><ambient>0.85 0.12 0.12 1</ambient><diffuse>0.85 0.12 0.12 1</diffuse></material>
+        </visual>
+        <visual name="wall_ny"><pose>0 -0.076 0.023 0 0 0</pose>
+          <geometry><box><size>0.16 0.008 0.03</size></box></geometry>
+          <material><ambient>0.85 0.12 0.12 1</ambient><diffuse>0.85 0.12 0.12 1</diffuse></material>
+        </visual>
+        <visual name="wall_px"><pose>0.076 0 0.023 0 0 0</pose>
+          <geometry><box><size>0.008 0.144 0.03</size></box></geometry>
+          <material><ambient>0.85 0.12 0.12 1</ambient><diffuse>0.85 0.12 0.12 1</diffuse></material>
+        </visual>
+        <visual name="wall_nx"><pose>-0.076 0 0.023 0 0 0</pose>
+          <geometry><box><size>0.008 0.144 0.03</size></box></geometry>
+          <material><ambient>0.85 0.12 0.12 1</ambient><diffuse>0.85 0.12 0.12 1</diffuse></material>
+        </visual>
+        <collision name="bottom"><pose>0 0 0.004 0 0 0</pose>
+          <geometry><box><size>0.16 0.16 0.008</size></box></geometry>
+        </collision>
+        <collision name="wall_py"><pose>0 0.076 0.023 0 0 0</pose>
+          <geometry><box><size>0.16 0.008 0.03</size></box></geometry>
+        </collision>
+        <collision name="wall_ny"><pose>0 -0.076 0.023 0 0 0</pose>
+          <geometry><box><size>0.16 0.008 0.03</size></box></geometry>
+        </collision>
+        <collision name="wall_px"><pose>0.076 0 0.023 0 0 0</pose>
+          <geometry><box><size>0.008 0.144 0.03</size></box></geometry>
+        </collision>
+        <collision name="wall_nx"><pose>-0.076 0 0.023 0 0 0</pose>
+          <geometry><box><size>0.008 0.144 0.03</size></box></geometry>
+        </collision>
+      </link>
+    </model>
+
+    <model name="bin_zone_b">
+      <static>true</static>
+      <pose>0.66 -0.09 0 0 0 0</pose>
+      <link name="bin">
+        <visual name="bottom"><pose>0 0 0.004 0 0 0</pose>
+          <geometry><box><size>0.16 0.16 0.008</size></box></geometry>
+          <material><ambient>0.12 0.25 0.85 1</ambient><diffuse>0.12 0.25 0.85 1</diffuse></material>
+        </visual>
+        <visual name="wall_py"><pose>0 0.076 0.023 0 0 0</pose>
+          <geometry><box><size>0.16 0.008 0.03</size></box></geometry>
+          <material><ambient>0.12 0.25 0.85 1</ambient><diffuse>0.12 0.25 0.85 1</diffuse></material>
+        </visual>
+        <visual name="wall_ny"><pose>0 -0.076 0.023 0 0 0</pose>
+          <geometry><box><size>0.16 0.008 0.03</size></box></geometry>
+          <material><ambient>0.12 0.25 0.85 1</ambient><diffuse>0.12 0.25 0.85 1</diffuse></material>
+        </visual>
+        <visual name="wall_px"><pose>0.076 0 0.023 0 0 0</pose>
+          <geometry><box><size>0.008 0.144 0.03</size></box></geometry>
+          <material><ambient>0.12 0.25 0.85 1</ambient><diffuse>0.12 0.25 0.85 1</diffuse></material>
+        </visual>
+        <visual name="wall_nx"><pose>-0.076 0 0.023 0 0 0</pose>
+          <geometry><box><size>0.008 0.144 0.03</size></box></geometry>
+          <material><ambient>0.12 0.25 0.85 1</ambient><diffuse>0.12 0.25 0.85 1</diffuse></material>
+        </visual>
+        <collision name="bottom"><pose>0 0 0.004 0 0 0</pose>
+          <geometry><box><size>0.16 0.16 0.008</size></box></geometry>
+        </collision>
+        <collision name="wall_py"><pose>0 0.076 0.023 0 0 0</pose>
+          <geometry><box><size>0.16 0.008 0.03</size></box></geometry>
+        </collision>
+        <collision name="wall_ny"><pose>0 -0.076 0.023 0 0 0</pose>
+          <geometry><box><size>0.16 0.008 0.03</size></box></geometry>
+        </collision>
+        <collision name="wall_px"><pose>0.076 0 0.023 0 0 0</pose>
+          <geometry><box><size>0.008 0.144 0.03</size></box></geometry>
+        </collision>
+        <collision name="wall_nx"><pose>-0.076 0 0.023 0 0 0</pose>
+          <geometry><box><size>0.008 0.144 0.03</size></box></geometry>
+        </collision>
+      </link>
+    </model>
+
+    <model name="bin_zone_c">
+      <static>true</static>
+      <pose>0.66 0.09 0 0 0 0</pose>
+      <link name="bin">
+        <visual name="bottom"><pose>0 0 0.004 0 0 0</pose>
+          <geometry><box><size>0.16 0.16 0.008</size></box></geometry>
+          <material><ambient>0.10 0.70 0.20 1</ambient><diffuse>0.10 0.70 0.20 1</diffuse></material>
+        </visual>
+        <visual name="wall_py"><pose>0 0.076 0.023 0 0 0</pose>
+          <geometry><box><size>0.16 0.008 0.03</size></box></geometry>
+          <material><ambient>0.10 0.70 0.20 1</ambient><diffuse>0.10 0.70 0.20 1</diffuse></material>
+        </visual>
+        <visual name="wall_ny"><pose>0 -0.076 0.023 0 0 0</pose>
+          <geometry><box><size>0.16 0.008 0.03</size></box></geometry>
+          <material><ambient>0.10 0.70 0.20 1</ambient><diffuse>0.10 0.70 0.20 1</diffuse></material>
+        </visual>
+        <visual name="wall_px"><pose>0.076 0 0.023 0 0 0</pose>
+          <geometry><box><size>0.008 0.144 0.03</size></box></geometry>
+          <material><ambient>0.10 0.70 0.20 1</ambient><diffuse>0.10 0.70 0.20 1</diffuse></material>
+        </visual>
+        <visual name="wall_nx"><pose>-0.076 0 0.023 0 0 0</pose>
+          <geometry><box><size>0.008 0.144 0.03</size></box></geometry>
+          <material><ambient>0.10 0.70 0.20 1</ambient><diffuse>0.10 0.70 0.20 1</diffuse></material>
+        </visual>
+        <collision name="bottom"><pose>0 0 0.004 0 0 0</pose>
+          <geometry><box><size>0.16 0.16 0.008</size></box></geometry>
+        </collision>
+        <collision name="wall_py"><pose>0 0.076 0.023 0 0 0</pose>
+          <geometry><box><size>0.16 0.008 0.03</size></box></geometry>
+        </collision>
+        <collision name="wall_ny"><pose>0 -0.076 0.023 0 0 0</pose>
+          <geometry><box><size>0.16 0.008 0.03</size></box></geometry>
+        </collision>
+        <collision name="wall_px"><pose>0.076 0 0.023 0 0 0</pose>
+          <geometry><box><size>0.008 0.144 0.03</size></box></geometry>
+        </collision>
+        <collision name="wall_nx"><pose>-0.076 0 0.023 0 0 0</pose>
+          <geometry><box><size>0.008 0.144 0.03</size></box></geometry>
+        </collision>
+      </link>
+    </model>
+
+    <model name="bin_zone_d">
+      <static>true</static>
+      <pose>0.66 0.27 0 0 0 0</pose>
+      <link name="bin">
+        <visual name="bottom"><pose>0 0 0.004 0 0 0</pose>
+          <geometry><box><size>0.16 0.16 0.008</size></box></geometry>
+          <material><ambient>0.92 0.78 0.10 1</ambient><diffuse>0.92 0.78 0.10 1</diffuse></material>
+        </visual>
+        <visual name="wall_py"><pose>0 0.076 0.023 0 0 0</pose>
+          <geometry><box><size>0.16 0.008 0.03</size></box></geometry>
+          <material><ambient>0.92 0.78 0.10 1</ambient><diffuse>0.92 0.78 0.10 1</diffuse></material>
+        </visual>
+        <visual name="wall_ny"><pose>0 -0.076 0.023 0 0 0</pose>
+          <geometry><box><size>0.16 0.008 0.03</size></box></geometry>
+          <material><ambient>0.92 0.78 0.10 1</ambient><diffuse>0.92 0.78 0.10 1</diffuse></material>
+        </visual>
+        <visual name="wall_px"><pose>0.076 0 0.023 0 0 0</pose>
+          <geometry><box><size>0.008 0.144 0.03</size></box></geometry>
+          <material><ambient>0.92 0.78 0.10 1</ambient><diffuse>0.92 0.78 0.10 1</diffuse></material>
+        </visual>
+        <visual name="wall_nx"><pose>-0.076 0 0.023 0 0 0</pose>
+          <geometry><box><size>0.008 0.144 0.03</size></box></geometry>
+          <material><ambient>0.92 0.78 0.10 1</ambient><diffuse>0.92 0.78 0.10 1</diffuse></material>
+        </visual>
+        <collision name="bottom"><pose>0 0 0.004 0 0 0</pose>
+          <geometry><box><size>0.16 0.16 0.008</size></box></geometry>
+        </collision>
+        <collision name="wall_py"><pose>0 0.076 0.023 0 0 0</pose>
+          <geometry><box><size>0.16 0.008 0.03</size></box></geometry>
+        </collision>
+        <collision name="wall_ny"><pose>0 -0.076 0.023 0 0 0</pose>
+          <geometry><box><size>0.16 0.008 0.03</size></box></geometry>
+        </collision>
+        <collision name="wall_px"><pose>0.076 0 0.023 0 0 0</pose>
+          <geometry><box><size>0.008 0.144 0.03</size></box></geometry>
+        </collision>
+        <collision name="wall_nx"><pose>-0.076 0 0.023 0 0 0</pose>
+          <geometry><box><size>0.008 0.144 0.03</size></box></geometry>
+        </collision>
+      </link>
+    </model>
+
+    <!-- ================= 俯视 RGB-D 相机 ================= -->
+    <model name="overhead_camera">
+      <static>true</static>
+      <!-- 安装位姿必须与 sorting_bringup/config/system.yaml 的 camera.mount_pose 一致 -->
+      <pose>0.47 0 0.95 0 1.5707963 0</pose>
+      <link name="camera_link">
+        <sensor name="rgbd_camera" type="rgbd_camera">
+          <topic>camera</topic>
+          <update_rate>10</update_rate>
+          <always_on>true</always_on>
+          <visualize>false</visualize>
+          <camera>
+            <horizontal_fov>1.0472</horizontal_fov>
+            <image>
+              <width>640</width>
+              <height>480</height>
+              <format>R8G8B8</format>
+            </image>
+            <clip>
+              <near>0.2</near>
+              <far>5.0</far>
+            </clip>
+            <noise>
+              <type>gaussian</type>
+              <mean>0.0</mean>
+              <stddev>0.0035</stddev>
+            </noise>
+          </camera>
+        </sensor>
+      </link>
+    </model>
+
+  </world>
+</sdf>

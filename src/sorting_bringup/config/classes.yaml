@@ -1,0 +1,81 @@
+# =============================================================
+#  待分拣物体类别定义（唯一的类别真值来源）
+#  - 视觉节点：class_id -> class_name 映射
+#  - 抓取节点：使用标称尺寸生成抓取位姿（受限场景下"已知 SKU 尺寸"假设）
+#  - 任务节点：类别 -> 分拣区映射
+# =============================================================
+#
+#  shape: box | cylinder | sphere
+#  size:  [x, y, z] 米（cylinder 为 [直径, 直径, 高]，sphere 为 [直径, 直径, 直径]）
+#  use_orientation: 是否根据掩码主轴方向调整夹爪 yaw（长条物体必需）
+#  grasp_width: 夹爪闭合方向的物体宽度（米）
+#  rgba: 仿真中的颜色（0~1）
+
+classes:
+  - id: 0
+    name: red_cube
+    display_name: 红色方块
+    shape: box
+    size: [0.050, 0.050, 0.050]
+    grasp_width: 0.050
+    use_orientation: false
+    placement_zone: zone_a
+    rgba: [0.85, 0.12, 0.12, 1.0]
+
+  - id: 1
+    name: blue_cylinder
+    display_name: 蓝色圆柱
+    shape: cylinder
+    size: [0.044, 0.044, 0.080]
+    grasp_width: 0.044
+    use_orientation: false
+    placement_zone: zone_b
+    rgba: [0.12, 0.25, 0.85, 1.0]
+
+  - id: 2
+    name: green_bar
+    display_name: 绿色长条
+    shape: box
+    size: [0.100, 0.030, 0.030]
+    grasp_width: 0.030
+    use_orientation: true
+    placement_zone: zone_c
+    rgba: [0.10, 0.70, 0.20, 1.0]
+
+  - id: 3
+    name: yellow_box
+    display_name: 黄色小盒
+    shape: box
+    size: [0.040, 0.040, 0.065]
+    grasp_width: 0.040
+    use_orientation: false
+    placement_zone: zone_d
+    rgba: [0.92, 0.78, 0.10, 1.0]
+
+# 每个分拣区对应的配色（用于 Gazebo 中标示，不影响分拣逻辑）
+zones:
+  zone_a:
+    bin_pose: [0.66, -0.27, 0.0]
+    rgba: [0.85, 0.12, 0.12, 1.0]
+  zone_b:
+    bin_pose: [0.66, -0.09, 0.0]
+    rgba: [0.12, 0.25, 0.85, 1.0]
+  zone_c:
+    bin_pose: [0.66, 0.09, 0.0]
+    rgba: [0.10, 0.70, 0.20, 1.0]
+  zone_d:
+    bin_pose: [0.66, 0.27, 0.0]
+    rgba: [0.92, 0.78, 0.10, 1.0]
+
+# 域随机化：物体颜色的色相抖动 ±hue_jitter（0~0.5，HSV 空间）
+domain_randomization:
+  enabled: true
+  hue_jitter: 0.03
+  value_range: [0.55, 1.0]
+  # 光照方向随机范围（弧度）
+  light_yaw_range: [0.0, 6.2832]
+  light_pitch_range: [0.6, 1.35]
+  light_pose_radius: 3.0
+  # 相机安装位置抖动（模拟标定误差）
+  camera_jitter_xyz: [0.010, 0.010, 0.008]
+  camera_jitter_rpy: [0.006, 0.006, 0.010]

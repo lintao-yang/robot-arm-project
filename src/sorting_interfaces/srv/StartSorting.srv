@@ -1,0 +1,6 @@
+# 启动分拣任务
+bool use_closed_loop   # 是否启用抓取前二次视觉校正（用于闭环对比实验）
+bool continuous        # true=循环分拣直到无可抓目标；false=只分拣一个目标
+---
+bool success
+string message

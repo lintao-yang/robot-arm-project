@@ -1,0 +1,11 @@
+# 执行一次完整的抓取-放置动作
+sorting_interfaces/GraspCandidate candidate
+bool use_closed_loop     # 是否在抓取前执行二次视觉校正
+float32 pregrasp_height  # 预抓取高度（米，0 表示使用默认配置）
+---
+bool success             # 动作链路是否正常执行完成
+bool grasped             # 抓取确认是否成功
+bool place_verified      # 放置后视觉复核是否通过
+uint32 retries           # 本次动作内的重试次数
+float32 duration         # 本次动作耗时（秒）
+string message

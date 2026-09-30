@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>sorting_evaluation</name>
+  <version>0.1.0</version>
+  <description>
+    模块7 日志与评价：记录分拣过程数据（CSV/JSON），统计抓取成功率、
+    分拣准确率、周期时间与定位误差，并生成对比实验图表。
+  </description>
+  <maintainer email="dev@example.com">robot sorting dev</maintainer>
+  <license>MIT</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>sorting_interfaces</exec_depend>
+  <exec_depend>sorting_bringup</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-matplotlib</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

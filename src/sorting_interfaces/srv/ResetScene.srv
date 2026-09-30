@@ -1,0 +1,9 @@
+# 重置仿真场景（重新随机摆放物体），并清零统计
+uint8 n_objects          # 待分拣物体数量（0 表示使用默认值）
+bool randomize_class     # 是否随机化类别
+bool randomize_pose      # 是否随机化位姿
+bool randomize_scene     # 是否随机化光照/桌面纹理（域随机化）
+---
+bool success
+string message
+uint8 spawned_objects

@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>sorting_task_planning</name>
+  <version>0.1.0</version>
+  <description>
+    任务调度与闭环状态机：维护待分拣目标队列，按可达性/置信度排序选择目标，
+    驱动抓取规划与运动执行，处理失败重试，并统计系统级指标。
+  </description>
+  <maintainer email="dev@example.com">robot sorting dev</maintainer>
+  <license>MIT</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>sorting_interfaces</exec_depend>
+  <exec_depend>sorting_bringup</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

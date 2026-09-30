@@ -1,0 +1,126 @@
+<?xml version="1.0"?>
+<!--
+  Franka Panda + 两指夹爪 的 Gazebo Sim (Ignition Fortress) 仿真描述
+
+  关键设计：
+    * 硬件插件为 gz_ros2_control/GazeboSimSystem
+      （apt 包 ros-humble-ign-ros2-control 提供）
+    * 机械臂用 position 命令接口，Gazebo Sim 下 ros2_control 通过每关节 PID
+      输出真实力矩，因此机械臂具备真实动力学：接触能反传到关节，
+      靠摩擦夹持搬运物体成为可能
+    * 夹爪用 effort 命令接口（真实力控）
+    * 父节点固定方式：名为 world 的 link + 固定关节
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="panda">
+
+  <!-- 官方 Panda 描述（link1~link8 + hand + leftfinger/rightfinger） -->
+  <xacro:include filename="$(find moveit_resources_panda_description)/urdf/panda.urdf"/>
+
+  <!-- ============================ 机械臂 ros2_control ============================ -->
+  <!-- initial_value 必须与 sorting_bringup/config/system.yaml 的 motion.home_joint_values
+       一致，否则控制器激活时会把关节拉到别处（Panda 零位是自碰撞构型）。 -->
+  <ros2_control name="PandaArmGazeboSimSystem" type="system">
+    <hardware>
+      <plugin>gz_ros2_control/GazeboSimSystem</plugin>
+    </hardware>
+
+    <joint name="panda_joint1">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="panda_joint2">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">-0.785</param></state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="panda_joint3">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="panda_joint4">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">-2.356</param></state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="panda_joint5">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="panda_joint6">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">1.571</param></state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="panda_joint7">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.785</param></state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+  </ros2_control>
+
+  <!-- ============================ 夹爪 ros2_control ============================ -->
+  <!-- 手指关节限位 [0, 0.04]：0 = 完全闭合，0.04 = 最大张开（总开口 0.08 m） -->
+  <ros2_control name="PandaHandGazeboSimSystem" type="system">
+    <hardware>
+      <plugin>gz_ros2_control/GazeboSimSystem</plugin>
+    </hardware>
+
+    <joint name="panda_finger_joint1">
+      <command_interface name="effort"/>
+      <state_interface name="position"><param name="initial_value">0.02</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="panda_finger_joint2">
+      <command_interface name="effort"/>
+      <state_interface name="position"><param name="initial_value">0.02</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+  </ros2_control>
+
+  <!-- ============================ 固定底座 ============================ -->
+  <!-- 名为 world 的 link：Gazebo Sim 会把该关节解释为"与世界的固定约束"，
+       等效于把机械臂底座锁死在世界原点。 -->
+  <link name="world"/>
+  <joint name="panda_base_mount" type="fixed">
+    <parent link="world"/>
+    <child link="panda_link0"/>
+  </joint>
+
+  <!-- ============================ ros2_control 插件 ============================ -->
+  <gazebo>
+    <plugin filename="ign_ros2_control-system"
+            name="gz_ros2_control::GazeboSimROS2ControlPlugin">
+      <parameters>$(find sorting_simulation)/config/ros2_controllers.yaml</parameters>
+      <ros>
+        <namespace>/</namespace>
+      </ros>
+    </plugin>
+  </gazebo>
+
+  <!-- ============================ 接触与摩擦参数 ============================ -->
+  <!-- Gazebo Sim 使用 DART，摩擦系数沿用官方量级即可（Classic 版为了弥补
+       运动学驱动才把 μ 抬到 20，这里不需要） -->
+  <gazebo reference="panda_leftfinger">
+    <mu1>3.0</mu1>
+    <mu2>3.0</mu2>
+  </gazebo>
+  <gazebo reference="panda_rightfinger">
+    <mu1>3.0</mu1>
+    <mu2>3.0</mu2>
+  </gazebo>
+  <gazebo reference="panda_hand">
+    <mu1>1.5</mu1>
+    <mu2>1.5</mu2>
+  </gazebo>
+
+</robot>

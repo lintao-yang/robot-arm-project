@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>sorting_motion_control</name>
+  <version>0.1.0</version>
+  <description>
+    模块5 运动规划与控制 + 模块6 闭环反馈：
+    基于 MoveIt2 /move_action 的位姿规划与执行、effort 力控夹爪、
+    抓取前二次视觉校正、抓取确认与放置复核。
+  </description>
+  <maintainer email="dev@example.com">robot sorting dev</maintainer>
+  <license>MIT</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>moveit_msgs</exec_depend>
+  <exec_depend>shape_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>sorting_interfaces</exec_depend>
+  <exec_depend>sorting_bringup</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

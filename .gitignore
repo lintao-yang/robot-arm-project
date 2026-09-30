@@ -1,0 +1,23 @@
+# ROS 2 构建产物
+build/
+install/
+log/
+
+# 运行时日志与录像
+logs/
+*.mp4
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 训练模型权重（体积大，另行管理）
+models/*.pt
+models/*.onnx
+
+# 编辑器/系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

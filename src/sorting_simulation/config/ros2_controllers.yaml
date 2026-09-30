@@ -1,0 +1,53 @@
+# =============================================================
+#  ros2_control 控制器配置（Gazebo Sim 仿真，gz_ros2_control 加载）
+# =============================================================
+
+controller_manager:
+  ros__parameters:
+    update_rate: 100          # Hz；手写时间步 1 ms，控制器 100 Hz
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    panda_arm_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    # 夹爪使用关节组力控控制器：直接下发力/力矩
+    panda_hand_controller:
+      type: effort_controllers/JointGroupEffortController
+
+# ---------------------------------------------------------------
+panda_arm_controller:
+  ros__parameters:
+    joints:
+      - panda_joint1
+      - panda_joint2
+      - panda_joint3
+      - panda_joint4
+      - panda_joint5
+      - panda_joint6
+      - panda_joint7
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+    allow_partial_joints_goal: false
+    open_loop_control: true
+    constraints:
+      stopped_velocity_tolerance: 0.10
+      goal_time: 0.0
+      panda_joint1: {trajectory: 0.15, goal: 0.10}
+      panda_joint2: {trajectory: 0.15, goal: 0.10}
+      panda_joint3: {trajectory: 0.15, goal: 0.10}
+      panda_joint4: {trajectory: 0.15, goal: 0.10}
+      panda_joint5: {trajectory: 0.15, goal: 0.10}
+      panda_joint6: {trajectory: 0.15, goal: 0.10}
+      panda_joint7: {trajectory: 0.15, goal: 0.10}
+
+# ---------------------------------------------------------------
+panda_hand_controller:
+  ros__parameters:
+    joints:
+      - panda_finger_joint1
+      - panda_finger_joint2

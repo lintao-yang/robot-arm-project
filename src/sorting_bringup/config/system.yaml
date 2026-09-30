@@ -1,0 +1,165 @@
+# =============================================================
+#  分拣系统全局配置
+#  被 sorting_bringup / sorting_simulation / sorting_vision 等包共同读取
+# =============================================================
+
+# ---------- 坐标系 ----------
+frames:
+  world: world                 # Gazebo 世界坐标系
+  base: panda_link0            # 机械臂基坐标系（MoveIt 规划基准）
+  ee_link: panda_link8         # MoveIt 末端执行器参考连杆
+  gripper_tcp_link: panda_hand # 夹爪掌心参考连杆
+  camera_link: camera_link     # 相机物理连杆（Gazebo 传感器系）
+  camera_optical: camera_optical_frame  # 相机光学坐标系（z 前 / x 右 / y 下）
+
+# ---------- 相机内参（与 worlds/sorting_world.sdf 保持一致）----------
+camera:
+  width: 640
+  height: 480
+  horizontal_fov: 1.0472       # 60 度
+  near: 0.20
+  far: 5.0
+  # 相机在 world 中的安装位姿（必须与 worlds/sorting_world.sdf 中的 overhead_camera 一致，
+  # 否则 TF 外参会与仿真真实安装位置不符，导致三维定位出现系统性偏差）
+  mount_pose:
+    x: 0.47
+    y: 0.0
+    z: 0.95
+    roll: 0.0
+    pitch: 1.5707963           # 绕 Y 轴 90 度 -> 光轴朝下
+    yaw: 0.0
+
+# ---------- 话题 ----------
+topics:
+  image_raw: /camera/image_raw
+  depth_image: /camera/depth/image_raw
+  camera_info: /camera/camera_info
+  point_cloud: /camera/points
+  detections: /sorting/detections        # 2D 检测/分割结果
+  targets: /sorting/targets              # 带三维定位结果的目标
+  grasp_candidates: /sorting/grasp_candidates
+  ground_truth: /sorting/ground_truth
+  statistics: /sorting/statistics
+  task_status: /sorting/task_status
+  detection_image: /sorting/detection_image
+
+# ---------- 服务 ----------
+services:
+  start_sorting: /sorting/start_sorting
+  reset_scene: /sorting/reset_scene
+  plan_grasp: /sorting/plan_grasp
+  execute_pick_place: /sorting/execute_pick_place
+
+# ---------- 分拣场景 ----------
+scene:
+  n_objects: 4                 # 默认待分拣物体数量
+  table:
+    top_z: 0.0                 # 桌面上表面高度（米）
+    size: [0.70, 0.80, 0.05]
+    pose: [0.42, 0.0, -0.025]
+  # 物体随机摆放区域（在桌面上的矩形范围）
+  scatter:
+    x_min: 0.30
+    x_max: 0.52
+    y_min: -0.26
+    y_max: 0.26
+    min_separation: 0.085      # 物体间最小间距，用于降低遮挡
+  # 机械臂工作区 ROI：只有落在这个范围内的目标才参与抓取
+  # （分拣箱位于 ROI 之外，避免箱子本身被当作待抓取目标）
+  workspace_roi:
+    x_min: 0.18
+    x_max: 0.58
+    y_min: -0.34
+    y_max: 0.34
+  # 分拣区（每个类别对应一个）
+  bins:
+    - zone_a
+    - zone_b
+    - zone_c
+    - zone_d
+  bin_pose_x: 0.66
+  bin_pose_y: [-0.27, -0.09, 0.09, 0.27]
+
+# ---------- 抓取策略 ----------
+grasp:
+  pregrasp_height: 0.12        # 预抓取点相对抓取点的高度（米）
+  lift_height: 0.15            # 抬升高度（米）
+  place_height: 0.10           # 放置点相对分拣区底面的高度（米）
+  tcp_length: 0.105            # panda_link8 -> 指尖 的距离（米）
+  # 夹取高度由两个几何约束共同决定（见 grasp_planner_node）：
+  #   手掌约束：link8 不能低于 物体顶面 + palm_offset（否则手掌碰撞体会压到物体顶部）
+  #   指尖约束：指尖不能低于 物体底面 + fingertip_min_margin（否则指尖会扎进桌面）
+  # 夹取高度取两者中较高者，从而在"手掌不碰物体"的前提下让手指尽量多包住物体。
+  palm_offset: 0.066           # panda_link8 到手掌碰撞体最低点的距离（米）
+  palm_clearance: 0.003        # 手掌相对物体顶面的安全间隙（米）
+  fingertip_min_margin: 0.006  # 指尖相对物体底面的最小高度（米）
+  max_grasp_width: 0.078       # 夹爪最大开口（米）
+  min_grasp_width: 0.008       # 夹爪最小开口（米）
+  bin_base_thickness: 0.008    # 分拣箱底板厚度（米），决定放置高度基准
+
+# ---------- 运动规划 ----------
+motion:
+  # 需与 MoveIt OMPL 配置中的 planner_configs 名称一致
+  # （moveit_resources_panda_moveit_config/config/ompl_planning.yaml）
+  planner_id: RRTConnectkConfigDefault
+  velocity_scaling: 0.25
+  accel_scaling: 0.25
+  approach_velocity_scaling: 0.10   # 接近目标时降速
+  cartesian_velocity_scaling: 0.10  # 直线插补（下降/抬升/放置）速度比例
+  goal_position_tolerance: 0.006    # 位姿约束容差（米）
+  goal_orientation_tolerance: 0.08  # 姿态约束容差（弧度）
+  # 单次规划时间与尝试次数：过大会显著拉长单次抓取周期
+  planning_time: 2.0
+  planning_attempts: 3
+  home_joint_values: [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785]
+  observe_joint_values: [0.0, -0.35, 0.0, -2.0, 0.0, 1.65, 0.785]
+
+# ---------- 夹爪（effort 力控）----------
+# 手指关节限位 [0, 0.04]：0 = 完全闭合，0.04 = 最大张开（总开口 0.08m）
+gripper:
+  command_topic: /panda_hand_controller/commands
+  joint_names: [panda_finger_joint1, panda_finger_joint2]
+  state_joint: panda_finger_joint1
+  open_effort: 6.0           # 张开力矩（牛顿，正值张开）
+  close_effort: 16.0         # 夹持力矩（牛顿，实际下发 -close_effort）
+  effort_sign: -1.0          # 闭合方向符号（-1 表示负力矩使手指靠拢）
+  open_position: 0.038       # 完全张开时的关节位置
+  grasp_threshold: 0.006     # 闭合后关节位置大于该值 => 判定夹住了物体
+  command_settle_time: 0.7   # 下发指令后等待物理稳定的时间
+  max_close_time: 1.2        # 闭合最大等待时间
+
+# ---------- 视觉 ----------
+vision:
+  backend: yolo                # yolo | classical
+  model_path: ""               # 空则使用 <workspace>/models/best.pt
+  conf_threshold: 0.45
+  iou_threshold: 0.5
+  device: "0"                  # "" = CPU, "0" = GPU
+  max_detections: 20
+  # 检测结果面积过滤（像素）：分拣箱等大色块会被颜色分割误检为目标，用面积上限剔除
+  max_mask_area: 6000
+  min_mask_area: 120
+  # 深度采样窗口（像素），取窗口内有效深度中位数
+  depth_window: 9
+  # 颜色分割后端参数：桌面为中性灰，高饱和度阈值可有效区分彩色目标
+  min_saturation: 150
+  hue_tolerance: 14
+  # 目标必须高于桌面的最小高度（米）：低于该值的三维点判为桌面/地面，直接剔除
+  min_object_height: 0.012
+  # 掩码质心深度有效范围（米）
+  min_depth: 0.2
+  max_depth: 2.0
+
+# ---------- 任务调度 ----------
+task:
+  use_closed_loop: true        # 是否启用抓取前二次视觉校正
+  max_retries_per_target: 2    # 单个目标最大重试次数
+  target_select_strategy: nearest_to_center   # nearest_to_center | highest_confidence
+  refine_tolerance: 0.015      # 二次校正后位置偏差阈值（米）
+  settle_time: 1.5             # 等待物理稳定时间（秒）
+
+# ---------- 评估 ----------
+evaluation:
+  log_dir: logs
+  export_csv: true
+  export_json: true

@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>sorting_simulation</name>
+  <version>0.1.0</version>
+  <description>
+    模块1 仿真环境：Gazebo 世界（桌面 / 分拣箱 / 顶部 RGB-D 相机 / 光源）、
+    Franka Panda 的 Gazebo+ros2_control 描述、场景管理与真值发布。
+  </description>
+  <maintainer email="dev@example.com">robot sorting dev</maintainer>
+  <license>MIT</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <!-- Gazebo Sim（Ignition Fortress）相关：仿真、生成/删除实体、话题桥接、控制 -->
+  <exec_depend>ros_gz_sim</exec_depend>
+  <exec_depend>ros_gz_bridge</exec_depend>
+  <exec_depend>ros_gz_interfaces</exec_depend>
+  <exec_depend>ign_ros2_control</exec_depend>
+  <exec_depend>tf2_msgs</exec_depend>
+  <exec_depend>controller_manager</exec_depend>
+  <exec_depend>joint_state_broadcaster</exec_depend>
+  <exec_depend>joint_trajectory_controller</exec_depend>
+  <exec_depend>effort_controllers</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>xacro</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>moveit_resources_panda_description</exec_depend>
+  <exec_depend>sorting_bringup</exec_depend>
+  <exec_depend>sorting_interfaces</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
