@@ -2,6 +2,5 @@
 
 from .gripper import GripperController
 from .moveit_client import MoveGroupClient
-from .motion_executor_node import MotionExecutorNode
 
-__all__ = ['GripperController', 'MoveGroupClient', 'MotionExecutorNode']
+__all__ = ['GripperController', 'MoveGroupClient']

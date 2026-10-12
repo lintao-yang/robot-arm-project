@@ -66,9 +66,9 @@ INERTIAL_TABLE: Dict[str, tuple] = {
 
 DEFAULT_INERTIAL = (0.5, (0.0, 0.0, 0.0), (1.0e-3, 0.0, 0.0, 1.0e-3, 0.0, 1.0e-3))
 
-# 名为 world 的 link 会被 Gazebo 识别为世界坐标系（用于固定机械臂底座）。
-# 其惯量不会参与物理计算，这里给一个非零值仅为了不被 sdformat 丢弃。
-INERTIAL_TABLE['world'] = (0.1, (0.0, 0.0, 0.0), (1.0e-3, 0.0, 0.0, 1.0e-3, 0.0, 1.0e-3))
+# 注意：机械臂底座通过名为 world 的 link + 固定关节挂到世界坐标系。
+# 该 link 不在此表中、也不注入惯量（Gazebo 视其为世界坐标系，无需惯量；
+# 注入反而会让 robot_state_publisher 的 KDL 告警）。详见 inject_inertials。
 
 
 def _build_inertial(parent: ET.Element, spec: tuple) -> ET.Element:
@@ -93,12 +93,25 @@ def _build_inertial(parent: ET.Element, spec: tuple) -> ET.Element:
 
 
 def inject_inertials(urdf_xml: str) -> str:
-    """为缺失 ``<inertial>`` 的 link 注入官方惯量参数。"""
+    """为缺失 ``<inertial>`` 的 link 注入官方惯量参数。
+
+    例外：名为 ``world`` 的 link **不注入**。实测（ign sdf -p）该 link 无论有无惯量，
+    转出的 SDF 逐字节一致——Gazebo 会把 ``world`` 解释为世界坐标系而非刚体。反之，
+    若给它注入惯量，robot_state_publisher 的 KDL 解析器会告警：
+
+        [kdl_parser]: The root link world has an inertia specified in the URDF,
+        but KDL does not support a root link with an inertia.
+
+    真实连杆则必须注入：sdformat 会丢弃缺少 ``<inertial>`` 的 link 及其关节
+    （实测移除 panda_link1 的惯量后，panda_link1 与 panda_joint1 都会被整体移除）。
+    """
     root = ET.fromstring(urdf_xml)
     for link in root.findall('link'):
         if link.find('inertial') is not None:
             continue
         name = link.get('name', '')
+        if name == 'world':
+            continue
         spec = INERTIAL_TABLE.get(name, DEFAULT_INERTIAL)
         inertial = _build_inertial(link, spec)
         # URDF 规范要求 inertial 位于 visual/collision 之前
@@ -164,6 +177,22 @@ def drop_finger_joint_mimic(urdf_xml: str) -> str:
     return ET.tostring(root, encoding='unicode')
 
 
+def raise_finger_effort_limit(urdf_xml: str, limit: float = 40.0) -> str:
+    """把手指关节的 effort 上限从官方 20N 提高（默认 40N）。
+
+    Gazebo Sim / gz_ros2_control 会按 URDF limit 截断关节力指令。本项目的夹持
+    策略是"闭合轻触（close 16N，防止撞偏物体）、保持加力（hold 30N，抵抗抬升
+    加速度造成的楔开/滑脱）"：若上限仍为 20N，保持力会被截断而达不到设计值。
+    """
+    root = ET.fromstring(urdf_xml)
+    for joint in root.findall('joint'):
+        if joint.get('name') in ('panda_finger_joint1', 'panda_finger_joint2'):
+            limit_element = joint.find('limit')
+            if limit_element is not None:
+                limit_element.set('effort', repr(float(limit)))
+    return ET.tostring(root, encoding='unicode')
+
+
 def load_robot_description(xacro_path: str, mappings: Optional[dict] = None) -> str:
     """xacro 展开 + 惯量注入 + 手指碰撞体简化，返回可用于 Gazebo / MoveIt 的 URDF。"""
     import xacro
@@ -171,7 +200,8 @@ def load_robot_description(xacro_path: str, mappings: Optional[dict] = None) -> 
     document = xacro.process_file(xacro_path, mappings=mappings or {})
     urdf = inject_inertials(document.toxml())
     urdf = simplify_finger_collision(urdf)
-    return drop_finger_joint_mimic(urdf)
+    urdf = drop_finger_joint_mimic(urdf)
+    return raise_finger_effort_limit(urdf)
 
 
 def main():

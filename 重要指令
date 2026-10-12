@@ -1,0 +1,9 @@
+开启仿真界面：
+cd ~/robot_sorting_project
+bash scripts/run_sorting.sh gui:=true rviz:=true
+
+开始运行（触发抓取）：
+cd ~/robot_sorting_project
+source scripts/env.sh
+ros2 service call /sorting/start_sorting sorting_interfaces/srv/StartSorting \
+  "{use_closed_loop: false, continuous: true}"

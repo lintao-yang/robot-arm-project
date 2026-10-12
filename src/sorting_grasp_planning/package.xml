@@ -4,8 +4,8 @@
   <name>sorting_grasp_planning</name>
   <version>0.1.0</version>
   <description>
-    模块4 抓取决策：由目标三维位姿与掩码主方向生成四段式抓取姿态
-    （pre-grasp / grasp / lift / place），并对候选做可抓性筛选与评分。
+    模块4 抓取决策：复用预训练 GraspNet 推理 6DoF 抓取位姿，
+    做宽度/接近方向过滤后发布 world 系抓取候选。
   </description>
   <maintainer email="dev@example.com">robot sorting dev</maintainer>
   <license>MIT</license>
@@ -13,7 +13,8 @@
   <exec_depend>rclpy</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>visualization_msgs</exec_depend>
-  <exec_depend>tf_transformations</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
   <exec_depend>sorting_interfaces</exec_depend>
   <exec_depend>sorting_bringup</exec_depend>
   <exec_depend>python3-numpy</exec_depend>

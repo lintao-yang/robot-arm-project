@@ -16,13 +16,12 @@ if [ -f "$WORKSPACE_DIR/install/setup.bash" ]; then
   source "$WORKSPACE_DIR/install/setup.bash"
 fi
 
-# 渲染方式：默认**强制软件渲染**（Mesa llvmpipe）。
-# 原因（本机 WSLg + RTX 3060 混合显卡实测）：Gazebo Sim 的 Ogre2 走 D3D12 驱动时会在
+# 渲染方式：裸机 Ubuntu 双系统，GPU 直通正常 → 使用硬件渲染（默认 0）。
+# 历史背景（WSLg 时代）：Ogre2 走 D3D12 驱动会抛
 #   OGRE EXCEPTION(9:UnimplementedException) in GL3PlusTextureGpu::copyTo
-# 处抛异常并终止进程（GUI 与相机传感器都会触发）。改用软件渲染后 GUI 与 RGB-D
-# 相机均稳定工作（相机 ~12 Hz）。
-# 若你的机器 GPU 直通正常，可设为 0 以获得更好性能与画面质量。
-export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
+# 故当时强制软件渲染。迁移裸机后该限制消失，改回硬件渲染以获更好性能与画质。
+# 若裸机遇 GPU 异常，可临时回退：export LIBGL_ALWAYS_SOFTWARE=1
+export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-0}"
 
 # Gazebo Sim 资源路径：URDF 中的网格/模型以 model://<包名>/... 形式引用
 # （sdformat 会把 package:// 转成 model://），必须把 ROS 的 share 目录加进来，

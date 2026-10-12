@@ -7,16 +7,13 @@ find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
-  "msg/Detection.msg"
-  "msg/DetectionArray.msg"
-  "msg/GraspCandidate.msg"
+  "msg/Grasp6D.msg"
+  "msg/Grasp6DArray.msg"
   "msg/SortingStatistics.msg"
   "msg/ObjectState.msg"
   "msg/ObjectStateArray.msg"
   "srv/StartSorting.srv"
   "srv/ResetScene.srv"
-  "srv/PlanGrasp.srv"
-  "srv/ExecutePickPlace.srv"
   DEPENDENCIES std_msgs geometry_msgs
 )
 

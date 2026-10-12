@@ -13,6 +13,7 @@ def _make_gripper():
         'state_joint': 'panda_finger_joint1',
         'open_effort': 6.0,
         'close_effort': 16.0,
+        'hold_effort': 30.0,
         'effort_sign': -1.0,
         'open_position': 0.038,
         'grasp_threshold': 0.006,
@@ -46,4 +47,19 @@ def test_hold_closing_publishes_signed_effort():
     publisher = gripper._publisher
     publisher.publish.assert_called_once()
     message = publisher.publish.call_args[0][0]
-    assert list(message.data) == [-16.0, -16.0]
+    assert list(message.data) == [-30.0, -30.0]  # 保持力矩（非闭合力矩）
+    # 应启动周期性刷新定时器
+    gripper._node.create_timer.assert_called_once()
+    assert gripper._node.create_timer.call_args[0][0] == 0.5
+
+
+def test_release_stops_hold_refresh():
+    gripper = _make_gripper()
+    gripper.hold_closing()
+    gripper._publisher.reset_mock()
+    gripper.release(wait=False)
+    # release 会先下发 open_effort 再撤力，共 2 次 publish
+    assert gripper._publisher.publish.call_count == 2
+    # 定时器应被取消
+    timer = gripper._node.create_timer.return_value
+    timer.cancel.assert_called_once()

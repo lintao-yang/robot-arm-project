@@ -13,7 +13,9 @@
 -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="panda">
 
-  <!-- 官方 Panda 描述（link1~link8 + hand + leftfinger/rightfinger） -->
+  <!-- 官方 Panda 描述（link1~link8 + hand + leftfinger/rightfinger）。
+       注意：手指关节 effort 上限由 urdf_utils.raise_finger_effort_limit()
+       在 xacro 展开后程序化提升到 40N（官方文件为 20N，会截断 30N 保持力矩） -->
   <xacro:include filename="$(find moveit_resources_panda_description)/urdf/panda.urdf"/>
 
   <!-- ============================ 机械臂 ros2_control ============================ -->
@@ -111,16 +113,115 @@
   <!-- Gazebo Sim 使用 DART，摩擦系数沿用官方量级即可（Classic 版为了弥补
        运动学驱动才把 μ 抬到 20，这里不需要） -->
   <gazebo reference="panda_leftfinger">
-    <mu1>3.0</mu1>
-    <mu2>3.0</mu2>
+    <mu1>5.0</mu1>
+    <mu2>5.0</mu2>
   </gazebo>
   <gazebo reference="panda_rightfinger">
-    <mu1>3.0</mu1>
-    <mu2>3.0</mu2>
+    <mu1>5.0</mu1>
+    <mu2>5.0</mu2>
   </gazebo>
   <gazebo reference="panda_hand">
     <mu1>1.5</mu1>
     <mu2>1.5</mu2>
+  </gazebo>
+
+  <!-- ===================== V 型槽指尖垫（抗圆柱滑脱的核心几何件） ===================== -->
+  <!-- 抬升相探针实证（探针脚本已随旧链路移除）：平垫夹圆柱是单线接触，
+       圆柱沿垫面横向（x）滚动完全自由——抬升扰动下圆柱横移 ~12mm 到达垫边缘
+       （垫宽 ~20mm），边缘接触形成浅楔，0.8s 内把手指从 0.0228 撬到 0.0401
+       全开，随后圆柱骑在张开的手指上被驮升、转运时滚落。
+       V 型槽提供双斜面接触：横向几何自定心（横移需爬升槽壁），20mm 高接触线
+       提供抗倾覆力矩臂。对方块类平面：贴合 V 顶点线接触，摩擦行为与平垫相当。
+       几何（按 r=22mm 圆柱精确设计，勿随意改陡）：
+         槽面与指面夹角 alpha=20°（顶视图方向 (cos20°,±sin20°)），顶点凸出指面
+         4mm。圆柱接触点落在 x=±r·sin(20°)=±7.5mm、指面前方 y=-6.7mm 处，
+         槽面全覆盖且**不侵入手指碰撞盒**（指盒 y∈[0,26.4]mm、x∈[±10.5]mm；
+         槽面 y≥0 的部分 x 已超出 ±10.5mm）——槽面过陡会插进指盒导致规划器
+         判定恒定自碰撞（MoveIt 99999），过浅则兜不住圆柱。
+       安装：手指连杆系原点在手指关节处（hand 系 z+58.4mm），指面为 y=0 平面、
+       指尖在手指系 z=+53.7mm（见 urdf_utils.simplify_finger_collision 的实测
+       包围盒注释）；垫片覆盖 z∈[+25,+45]mm = 现有抓取高度接触区，
+       垫片底缘比指尖高 8.7mm，不会引入新的桌面碰撞。 -->
+  <link name="panda_leftfinger_pad">
+    <inertial>
+      <mass value="0.002"/>
+      <origin xyz="0 0 0.035"/>
+      <inertia ixx="1e-7" iyy="1e-7" izz="1e-7" ixy="0.0" ixz="0.0" iyz="0.0"/>
+    </inertial>
+    <!-- 左手指内侧面朝 -y（掌心方向），V 顶点凸向 -y -->
+    <collision name="vgroove_face_a">
+      <origin rpy="0 0 0.3491" xyz="0.00752 -0.00126 0.035"/>
+      <geometry><box size="0.016 0.004 0.020"/></geometry>
+    </collision>
+    <collision name="vgroove_face_b">
+      <origin rpy="0 0 2.7925" xyz="-0.00752 -0.00126 0.035"/>
+      <geometry><box size="0.016 0.004 0.020"/></geometry>
+    </collision>
+    <visual>
+      <origin rpy="0 0 0.3491" xyz="0.00752 -0.00126 0.035"/>
+      <geometry><box size="0.016 0.004 0.020"/></geometry>
+      <material name="pad_gray"><color rgba="0.35 0.35 0.38 1.0"/></material>
+    </visual>
+    <visual>
+      <origin rpy="0 0 2.7925" xyz="-0.00752 -0.00126 0.035"/>
+      <geometry><box size="0.016 0.004 0.020"/></geometry>
+      <material name="pad_gray2"><color rgba="0.35 0.35 0.38 1.0"/></material>
+    </visual>
+  </link>
+  <joint name="panda_leftfinger_pad_joint" type="fixed">
+    <parent link="panda_leftfinger"/>
+    <child link="panda_leftfinger_pad"/>
+    <origin rpy="0 0 0" xyz="0 0 0"/>
+  </joint>
+
+  <link name="panda_rightfinger_pad">
+    <inertial>
+      <mass value="0.002"/>
+      <origin xyz="0 0 0.035"/>
+      <inertia ixx="1e-7" iyy="1e-7" izz="1e-7" ixy="0.0" ixz="0.0" iyz="0.0"/>
+    </inertial>
+    <!-- 右手指与左手指镜像：内侧面朝 +y，V 顶点凸向 +y -->
+    <collision name="vgroove_face_a">
+      <origin rpy="0 0 -0.3491" xyz="0.00752 0.00126 0.035"/>
+      <geometry><box size="0.016 0.004 0.020"/></geometry>
+    </collision>
+    <collision name="vgroove_face_b">
+      <origin rpy="0 0 -2.7925" xyz="-0.00752 0.00126 0.035"/>
+      <geometry><box size="0.016 0.004 0.020"/></geometry>
+    </collision>
+    <visual>
+      <origin rpy="0 0 -0.3491" xyz="0.00752 0.00126 0.035"/>
+      <geometry><box size="0.016 0.004 0.020"/></geometry>
+      <material name="pad_gray3"><color rgba="0.35 0.35 0.38 1.0"/></material>
+    </visual>
+    <visual>
+      <origin rpy="0 0 -2.7925" xyz="-0.00752 0.00126 0.035"/>
+      <geometry><box size="0.016 0.004 0.020"/></geometry>
+      <material name="pad_gray4"><color rgba="0.35 0.35 0.38 1.0"/></material>
+    </visual>
+  </link>
+  <joint name="panda_rightfinger_pad_joint" type="fixed">
+    <parent link="panda_rightfinger"/>
+    <child link="panda_rightfinger_pad"/>
+    <origin rpy="0 0 0" xyz="0 0 0"/>
+  </joint>
+
+  <!-- 阻止 URDF->SDF 的 fixed-joint 集块（lumping）：保持垫片为独立 link，
+       上面的 mu 标签才会生效；DART 原生支持 fixed 关节，无额外约束开销 -->
+  <gazebo reference="panda_leftfinger_pad_joint">
+    <preserveFixedJoint>true</preserveFixedJoint>
+  </gazebo>
+  <gazebo reference="panda_rightfinger_pad_joint">
+    <preserveFixedJoint>true</preserveFixedJoint>
+  </gazebo>
+
+  <gazebo reference="panda_leftfinger_pad">
+    <mu1>3.0</mu1>
+    <mu2>3.0</mu2>
+  </gazebo>
+  <gazebo reference="panda_rightfinger_pad">
+    <mu1>3.0</mu1>
+    <mu2>3.0</mu2>
   </gazebo>
 
 </robot>

@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>机器人智能分拣系统 · 操作台</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #14171c; color: #d7dce3; font-family: "Microsoft YaHei", "Segoe UI", sans-serif; font-size: 13px; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: #1c2129; border-bottom: 1px solid #2a313c; }
+  header h1 { font-size: 16px; font-weight: 600; }
+  #conn { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #e74c3c; }
+  .dot.on { background: #2ecc71; }
+  main { display: grid; grid-template-columns: 3fr 2fr; gap: 8px; padding: 8px; }
+  .panel { background: #1c2129; border: 1px solid #2a313c; border-radius: 6px; padding: 8px; }
+  .panel h2 { font-size: 13px; color: #8b95a5; margin-bottom: 6px; font-weight: 600; }
+  #view3d { width: 100%; height: 520px; background: #10131a; border-radius: 4px; overflow: hidden; }
+  #video { width: 100%; border-radius: 4px; background: #10131a; min-height: 240px; }
+  .vbtns { margin-bottom: 6px; display: flex; gap: 6px; }
+  .vbtns button { font-size: 12px; padding: 3px 10px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 3px 6px; border-bottom: 1px solid #2a313c; font-size: 12px; }
+  th { color: #8b95a5; }
+  .cls { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+  footer { display: grid; grid-template-columns: auto 1fr 2fr; gap: 8px; padding: 0 8px 8px; }
+  button { background: #2f6fdd; color: #fff; border: none; border-radius: 4px; padding: 8px 14px; font-size: 13px; cursor: pointer; }
+  button:hover { background: #3b7ef0; }
+  button:disabled { background: #3a4250; cursor: not-allowed; }
+  button.warn { background: #c77b2d; }
+  #ctrl button { display: block; width: 100%; margin-bottom: 6px; }
+  #statusLine { font-size: 13px; padding: 6px 8px; background: #10131a; border-radius: 4px; margin-bottom: 6px; min-height: 30px; }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+  .stat { background: #10131a; border-radius: 4px; padding: 5px 8px; }
+  .stat .k { color: #8b95a5; font-size: 11px; }
+  .stat .v { font-size: 15px; font-weight: 600; color: #e8edf3; }
+  #log { height: 130px; overflow-y: auto; background: #10131a; border-radius: 4px; padding: 6px 8px; font-family: Consolas, monospace; font-size: 12px; }
+  #log .w { color: #e0a53c; } #log .e { color: #e05c5c; } #log .t { color: #5a6474; margin-right: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>机器人智能分拣系统 · 操作台</h1>
+  <span id="conn"><span class="dot" id="connDot"></span><span id="connText">未连接</span></span>
+</header>
+<main>
+  <div class="panel">
+    <h2>3D 场景（拖拽旋转 / 滚轮缩放）— 彩色球体为 GraspNet 抓取候选</h2>
+    <div id="view3d"></div>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:8px;">
+    <div class="panel">
+      <h2>相机画面</h2>
+      <img id="video" alt="相机流（系统启动后自动出现）">
+    </div>
+    <div class="panel">
+      <h2>抓取候选（/sorting/graspnet_grasps）</h2>
+      <table>
+        <thead><tr><th>评分</th><th>开口 (mm)</th><th>位置 x/y/z (mm)</th></tr></thead>
+        <tbody id="targets"><tr><td colspan="3" style="color:#5a6474">暂无抓取</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+<footer>
+  <div class="panel" id="ctrl">
+    <h2>任务控制</h2>
+    <button id="btnStart" disabled>▶ 开始连续分拣</button>
+    <button id="btnOnce" disabled>▶ 单次分拣</button>
+    <button id="btnReset" class="warn" disabled>⟳ 重置场景</button>
+  </div>
+  <div class="panel">
+    <h2>任务状态</h2>
+    <div id="statusLine">等待系统启动…</div>
+    <div class="stats" id="stats"></div>
+  </div>
+  <div class="panel">
+    <h2>事件日志</h2>
+    <div id="log"></div>
+  </div>
+</footer>
+
+<script src="vendor/eventemitter2.js"></script>
+<script src="vendor/three.min.js"></script>
+<script src="vendor/ColladaLoader.js"></script>
+<script src="vendor/STLLoader.js"></script>
+<script src="vendor/roslib.min.js"></script>
+<script src="vendor/ros3d.min.js"></script>
+<script>
+(function () {
+  var host = location.hostname || 'localhost';
+  var WS_URL = 'ws://' + host + ':9090';
+  var VIDEO_BASE = 'http://' + host + ':8080/stream?topic=';
+
+  // ---------- ROS 连接 ----------
+  var ros = new ROSLIB.Ros({ url: WS_URL });
+  var dot = document.getElementById('connDot'), connText = document.getElementById('connText');
+  var buttons = ['btnStart', 'btnOnce', 'btnReset'].map(function (id) { return document.getElementById(id); });
+  ros.on('connection', function () {
+    dot.className = 'dot on'; connText.textContent = '已连接 rosbridge (' + WS_URL + ')';
+    buttons.forEach(function (b) { b.disabled = false; });
+    log('系统', '已连接 rosbridge');
+  });
+  ros.on('close', function () {
+    dot.className = 'dot'; connText.textContent = '连接断开，3 秒后重连…';
+    buttons.forEach(function (b) { b.disabled = true; });
+    setTimeout(function () { ros.connect(WS_URL); }, 3000);
+  });
+  ros.on('error', function () { connText.textContent = '连接错误（rosbridge 未就绪？）'; });
+
+  // ---------- 3D 视图 ----------
+  var container = document.getElementById('view3d');
+  var viewer = new ROS3D.Viewer({
+    divID: 'view3d', width: container.clientWidth, height: container.clientHeight,
+    antialias: true, background: '#10131a'
+  });
+  viewer.addObject(new ROS3D.Grid({ cellSize: 0.1, color: 0x3a4250 }));
+  var tfClient = new ROSLIB.TFClient({ ros: ros, fixedFrame: 'panda_link0', rate: 10.0 });
+  var assetsPath = location.origin + '/web_ui/assets/';
+  new ROSLIB.Topic({ ros: ros, name: '/web_ui/robot_description', messageType: 'std_msgs/String' })
+    .subscribe(function (msg) {
+      if (viewer._urdfLoaded) return;
+      viewer._urdfLoaded = true;
+      new ROS3D.Urdf({ urdf: msg.data, path: assetsPath, tfClient: tfClient, rootObject: viewer.scene });
+      log('系统', 'URDF 模型已加载');
+    });
+
+  // 抓取候选球体标记（world 系位置；最高分红色，其余绿色）
+  var markerGroup = new THREE.Group();
+  viewer.scene.add(markerGroup);
+  function updateMarkers(grasps) {
+    while (markerGroup.children.length) markerGroup.remove(markerGroup.children[0]);
+    grasps.slice(0, 30).forEach(function (g, i) {
+      var color = i === 0 ? 0xe74c3c : 0x2ecc71;
+      var s = new THREE.Mesh(
+        new THREE.SphereGeometry(0.012, 16, 16),
+        new THREE.MeshLambertMaterial({ color: color, transparent: true, opacity: 0.85 })
+      );
+      s.position.set(g.pose.position.x, g.pose.position.y, g.pose.position.z);
+      markerGroup.add(s);
+    });
+  }
+
+  // ---------- 相机画面 ----------
+  var video = document.getElementById('video');
+  video.src = VIDEO_BASE + '/camera/image_raw';
+
+  // ---------- 抓取候选列表 ----------
+  new ROSLIB.Topic({ ros: ros, name: '/sorting/graspnet_grasps', messageType: 'sorting_interfaces/Grasp6DArray' })
+    .subscribe(function (msg) {
+      updateMarkers(msg.grasps);
+      var tb = document.getElementById('targets');
+      if (!msg.grasps.length) {
+        tb.innerHTML = '<tr><td colspan="3" style="color:#5a6474">暂无抓取</td></tr>';
+        return;
+      }
+      tb.innerHTML = msg.grasps.slice(0, 12).map(function (g, i) {
+        var color = i === 0 ? '#e74c3c' : '#2ecc71';
+        var p = (g.pose.position.x * 1000).toFixed(0) + ' / ' +
+          (g.pose.position.y * 1000).toFixed(0) + ' / ' +
+          (g.pose.position.z * 1000).toFixed(0);
+        return '<tr><td><span class="cls" style="background:' + color + '"></span>' + g.score.toFixed(3) +
+          '</td><td>' + (g.width * 1000).toFixed(0) + '</td><td>' + p + '</td></tr>';
+      }).join('');
+    });
+
+  // ---------- 任务状态与统计 ----------
+  new ROSLIB.Topic({ ros: ros, name: '/sorting/task_status', messageType: 'std_msgs/String' })
+    .subscribe(function (msg) { document.getElementById('statusLine').textContent = msg.data; });
+
+  var STAT_KEYS = [
+    ['attempted', '已尝试'], ['picked_success', '抓取成功'], ['grasp_failures', '抓取失败'],
+    ['grasp_success_rate', '抓取成功率', function (v) { return (v * 100).toFixed(1) + '%'; }],
+    ['avg_cycle_time', '平均周期', function (v) { return v.toFixed(1) + 's'; }],
+    ['state', '状态机']
+  ];
+  document.getElementById('stats').innerHTML = STAT_KEYS.map(function (s) {
+    return '<div class="stat"><div class="k">' + s[1] + '</div><div class="v" id="st_' + s[0] + '">—</div></div>';
+  }).join('');
+  new ROSLIB.Topic({ ros: ros, name: '/sorting/statistics', messageType: 'sorting_interfaces/SortingStatistics' })
+    .subscribe(function (msg) {
+      STAT_KEYS.forEach(function (s) {
+        var el = document.getElementById('st_' + s[0]);
+        if (el && msg[s[0]] !== undefined) el.textContent = s[2] ? s[2](msg[s[0]]) : msg[s[0]];
+      });
+    });
+
+  // ---------- 事件日志（过滤关键节点）----------
+  var logBox = document.getElementById('log');
+  var WATCH = ['graspnet_planner', 'graspnet_pick_place', 'pointcloud_preprocessor', 'scene_manager'];
+  function log(name, text, cls) {
+    var time = new Date().toTimeString().slice(0, 8);
+    var div = document.createElement('div');
+    if (cls) div.className = cls;
+    div.innerHTML = '<span class="t">' + time + '</span>[' + name + '] ' + text;
+    logBox.appendChild(div);
+    while (logBox.children.length > 150) logBox.removeChild(logBox.children[0]);
+    logBox.scrollTop = logBox.scrollHeight;
+  }
+  new ROSLIB.Topic({ ros: ros, name: '/rosout_agg', messageType: 'rcl_interfaces/Log' })
+    .subscribe(function (msg) {
+      if (msg.level < 20) return;
+      var hit = WATCH.some(function (w) { return msg.name.indexOf(w) >= 0; });
+      if (!hit) return;
+      log(msg.name, msg.msg, msg.level >= 40 ? 'e' : (msg.level >= 30 ? 'w' : ''));
+    });
+
+  // ---------- 任务控制 ----------
+  function callService(name, type, req, label) {
+    var srv = new ROSLIB.Service({ ros: ros, name: name, serviceType: type });
+    srv.callService(new ROSLIB.ServiceRequest(req), function (res) {
+      log('操作台', label + ' → ' + (res.success ? '成功' : '失败') + '：' + res.message,
+        res.success ? '' : 'e');
+    }, function () { log('操作台', label + ' 调用失败（服务不可用）', 'e'); });
+  }
+  document.getElementById('btnStart').onclick = function () {
+    callService('/sorting/start_sorting', 'sorting_interfaces/srv/StartSorting',
+      { use_closed_loop: false, continuous: true }, '开始连续分拣');
+  };
+  document.getElementById('btnOnce').onclick = function () {
+    callService('/sorting/start_sorting', 'sorting_interfaces/srv/StartSorting',
+      { use_closed_loop: false, continuous: false }, '单次分拣');
+  };
+  document.getElementById('btnReset').onclick = function () {
+    callService('/sorting/reset_scene', 'sorting_interfaces/srv/ResetScene',
+      { n_objects: 0, randomize_class: true, randomize_pose: true, randomize_scene: false }, '重置场景');
+  };
+})();
+</script>
+</body>
+</html>

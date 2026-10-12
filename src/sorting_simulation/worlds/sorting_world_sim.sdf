@@ -290,8 +290,10 @@
     <!-- ================= 俯视 RGB-D 相机 ================= -->
     <model name="overhead_camera">
       <static>true</static>
-      <!-- 安装位姿必须与 sorting_bringup/config/system.yaml 的 camera.mount_pose 一致 -->
-      <pose>0.47 0 0.95 0 1.5707963 0</pose>
+      <!-- 安装位姿必须与 sorting_bringup/config/system.yaml 的 camera.mount_pose 一致。
+           侧上方俯视 60°：原先光轴正朝下会与机械臂伸入方向共轴，机械臂一进工作区
+           就整片挡住视野；移到 -y 侧后不再共轴（详见 system.yaml 的说明）。 -->
+      <pose>0.42 -0.5485 0.95 0 1.0471976 1.5707963</pose>
       <link name="camera_link">
         <sensor name="rgbd_camera" type="rgbd_camera">
           <topic>camera</topic>

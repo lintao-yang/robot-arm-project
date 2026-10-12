@@ -1,6 +1,0 @@
-# 为指定目标生成四段式抓取候选
-sorting_interfaces/Detection target
----
-bool success
-string message
-sorting_interfaces/GraspCandidate candidate

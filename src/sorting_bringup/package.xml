@@ -13,6 +13,11 @@
   <exec_depend>rclpy</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <!-- 注意：不声明 sorting_simulation 依赖（其已依赖本包，声明会构成环）。
+       urdf_relay 节点运行时从同一工作区导入它，与本包 launch 引用其 launch 文件同理。 -->
+  <exec_depend>rosbridge_server</exec_depend>
+  <exec_depend>web_video_server</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

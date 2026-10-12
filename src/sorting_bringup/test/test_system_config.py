@@ -42,7 +42,8 @@ def test_no_duplicate_keys():
 def test_required_sections_present():
     config = _load()
     for section in ('frames', 'camera', 'topics', 'services', 'scene',
-                    'grasp', 'motion', 'gripper', 'vision', 'task', 'evaluation'):
+                    'grasp', 'motion', 'gripper', 'perception', 'graspnet',
+                    'evaluation'):
         assert section in config, f'缺少配置段: {section}'
 
 

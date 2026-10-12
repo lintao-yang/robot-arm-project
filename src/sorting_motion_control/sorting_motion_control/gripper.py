@@ -27,6 +27,9 @@ class GripperController:
         self.state_joint = config.get('state_joint', self.joint_names[0])
         self.open_effort = float(config['open_effort'])
         self.close_effort = float(config['close_effort'])
+        # 保持力矩：抓取确认后搬运全程使用（大于闭合力矩，抵抗抬升加速度造成的
+        # 楔开/滑脱）；未配置时退化为闭合力矩
+        self.hold_effort = float(config.get('hold_effort', self.close_effort))
         self.effort_sign = float(config.get('effort_sign', -1.0))
         self.open_position = float(config.get('open_position', 0.038))
         self.grasp_threshold = float(config['grasp_threshold'])
@@ -35,15 +38,28 @@ class GripperController:
 
         self._publisher = node.create_publisher(Float64MultiArray, self.command_topic, 10)
         self._positions = {}
+        self._efforts = {}
         node.create_subscription(JointState, joint_state_topic, self._on_joint_state, 10)
+
+        # 周期性保持力矩刷新：经实证（scripts/test_hold_path.sh），gz_ros2_control
+        # 的 forward command 通路会保持最后一次指令，不刷新也不会丢力；此刷新作为
+        # 廉价保险保留（覆盖控制器重载等边界情况），并非必需机制。
+        self._hold_timer = None
+        self._hold_effort = None
 
     # ------------------------------------------------------------------
     def _on_joint_state(self, msg):
         for name, position in zip(msg.name, msg.position):
             self._positions[name] = float(position)
+        for name, effort in zip(msg.name, msg.effort):
+            self._efforts[name] = float(effort)
 
     def finger_position(self):
         return self._positions.get(self.state_joint)
+
+    def finger_effort(self):
+        """手指关节的力矩反馈（牛顿）：用于抓取验证时读取实际接触力。"""
+        return self._efforts.get(self.state_joint)
 
     def _command(self, effort: float):
         from std_msgs.msg import Float64MultiArray
@@ -52,17 +68,36 @@ class GripperController:
         message.data = [float(effort)] * len(self.joint_names)
         self._publisher.publish(message)
 
+    def _on_hold_timer(self):
+        if self._hold_effort is not None:
+            self._command(self._hold_effort)
+
+    def _start_hold_refresh(self):
+        """启动周期性保持力矩刷新（0.5s 周期）。"""
+        if self._hold_timer is None:
+            self._hold_timer = self._node.create_timer(0.5, self._on_hold_timer)
+
+    def _stop_hold_refresh(self):
+        if self._hold_timer is not None:
+            self._hold_timer.cancel()
+            self._hold_timer = None
+        self._hold_effort = None
+
     def hold_closing(self):
-        """保持夹持力矩（搬运过程中持续下发，防止物体滑落）。"""
-        self._command(self.effort_sign * self.close_effort)
+        """以保持力矩夹持并启动周期性刷新（搬运过程中持续有效）。"""
+        self._hold_effort = self.effort_sign * self.hold_effort
+        self._command(self._hold_effort)
+        self._start_hold_refresh()
 
     def open(self, wait: bool = True):
+        self._stop_hold_refresh()
         self._command(self.open_effort)
         if wait:
             time.sleep(self.settle_time)
 
     def release(self, wait: bool = True):
         """释放物体：短时张开后撤力，避免物体被弹飞。"""
+        self._stop_hold_refresh()
         self._command(self.open_effort)
         if wait:
             time.sleep(self.settle_time)

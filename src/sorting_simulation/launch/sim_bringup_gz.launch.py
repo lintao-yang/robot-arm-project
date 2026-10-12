@@ -18,6 +18,7 @@ from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
     IncludeLaunchDescription,
+    SetEnvironmentVariable,
     TimerAction,
 )
 from launch.conditions import IfCondition, UnlessCondition
@@ -39,6 +40,36 @@ BRIDGE_TOPICS = [
     # 物体实时位姿（gz Pose_V -> tf2 TFMessage），scene_manager 用它发布真值
     '/world/sorting_world/dynamic_pose/info@tf2_msgs/msg/TFMessage@ignition.msgs.Pose_V',
 ]
+
+
+def _gazebo_resource_path() -> str:
+    """构造 Gazebo 资源查找路径（所有 ament 前缀的 share 目录）。
+
+    URDF 中的网格以 ``model://<包名>/...`` 引用（sdformat 会把 ``package://`` 转成
+    ``model://``）。Gazebo 只在 ``GZ_SIM_RESOURCE_PATH`` / ``IGN_GAZEBO_RESOURCE_PATH``
+    列出的目录下查找；若缺少 ROS 的 share 目录，机器人会"没有可视与碰撞几何"：
+
+        [Err] Unable to find file with URI
+        [model://moveit_resources_panda_description/meshes/visual/link0.dae]
+
+    该变量原先仅由 ``scripts/env.sh`` 设置。这里在 launch 内自带设置，使分层启动
+    （直接 ``ros2 launch``、不 source env.sh）同样能正确加载网格。
+    """
+    shares = []
+    for prefix in os.environ.get('AMENT_PREFIX_PATH', '').split(os.pathsep):
+        if prefix:
+            share = os.path.join(prefix, 'share')
+            if share not in shares:
+                shares.append(share)
+    fallback = '/opt/ros/humble/share'
+    if fallback not in shares:
+        shares.append(fallback)
+    # 保留外部已设置的条目（例如用户自定义的模型目录）
+    for var in ('GZ_SIM_RESOURCE_PATH', 'IGN_GAZEBO_RESOURCE_PATH'):
+        for entry in os.environ.get(var, '').split(os.pathsep):
+            if entry and entry not in shares:
+                shares.append(entry)
+    return os.pathsep.join(shares)
 
 
 def generate_launch_description():
@@ -129,12 +160,12 @@ def generate_launch_description():
     )
 
     def controller_spawner(name):
+        """带重试的 controller spawner（解决 gz_ros2_control 异步加载竞态）。"""
         return Node(
-            package='controller_manager',
-            executable='spawner',
+            package='sorting_simulation',
+            executable='retry_spawner',
             output='screen',
-            arguments=[name, '--controller-manager', '/controller_manager',
-                       '--controller-manager-timeout', '90'],
+            arguments=['--controller', name, '--max-retries', '5'],
         )
 
     scene_manager = Node(
@@ -147,6 +178,9 @@ def generate_launch_description():
     return LaunchDescription(
         declared_arguments
         + [
+            # 必须在 Gazebo 启动前设置网格资源路径（见 _gazebo_resource_path 说明）
+            SetEnvironmentVariable('GZ_SIM_RESOURCE_PATH', _gazebo_resource_path()),
+            SetEnvironmentVariable('IGN_GAZEBO_RESOURCE_PATH', _gazebo_resource_path()),
             gazebo_gui,
             gazebo_headless,
             robot_state_publisher,

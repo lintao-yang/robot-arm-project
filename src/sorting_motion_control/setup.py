@@ -20,7 +20,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'motion_executor_node = sorting_motion_control.motion_executor_node:main',
+            'graspnet_pick_place_node = '
+            'sorting_motion_control.graspnet_pick_place_node:main',
         ],
     },
 )

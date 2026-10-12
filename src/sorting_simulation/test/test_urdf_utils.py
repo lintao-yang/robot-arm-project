@@ -35,8 +35,9 @@ def test_inertials_injected():
 
 def test_finger_mimic_removed():
     urdf = _urdf()
+    # 只匹配机器人本体 joint（带 type 属性），排除 ros2_control 的接口声明块
     finger_blocks = re.findall(
-        r'<joint name="panda_finger_joint\d".*?</joint>', urdf, re.S
+        r'<joint name="panda_finger_joint\d" type="[^"]*".*?</joint>', urdf, re.S
     )
     assert len(finger_blocks) == 2
     for block in finger_blocks:

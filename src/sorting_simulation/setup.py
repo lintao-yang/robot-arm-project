@@ -29,6 +29,7 @@ setup(
         'console_scripts': [
             'scene_manager = sorting_simulation.scene_manager:main',
             'dump_urdf = sorting_simulation.urdf_utils:main',
+            'retry_spawner = sorting_simulation.retry_spawner:main',
         ],
     },
 )

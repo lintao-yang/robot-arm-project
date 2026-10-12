@@ -1,6 +1,7 @@
 # =============================================================
 #  分拣系统全局配置
-#  被 sorting_bringup / sorting_simulation / sorting_vision 等包共同读取
+#  被 sorting_bringup / sorting_simulation / sorting_perception /
+#  sorting_grasp_planning / sorting_motion_control 等包共同读取
 # =============================================================
 
 # ---------- 坐标系 ----------
@@ -19,36 +20,42 @@ camera:
   horizontal_fov: 1.0472       # 60 度
   near: 0.20
   far: 5.0
-  # 相机在 world 中的安装位姿（必须与 worlds/sorting_world.sdf 中的 overhead_camera 一致，
-  # 否则 TF 外参会与仿真真实安装位置不符，导致三维定位出现系统性偏差）
+  # 相机在 world 中的安装位姿（必须与 worlds/sorting_world_sim.sdf 中的 camera 模型
+  # 的 <pose> 一致，否则外参会与仿真真实安装位置不符，导致三维定位出现系统性偏差）。
+  #
+  # 为什么从"正上方俯视"改为"侧上方俯视 60°"（改动原因）：
+  #   原先相机在 (0.47, 0, 0.95) 光轴正朝下，恰好与机械臂的伸入方向共轴——机械臂
+  #   一进入工作区就把工作区中心整片挡住（实测俯视相机画面里机械臂占了大半幅面，
+  #   四个物体被挤到边缘），点云里因此混入大量机械臂自身，GraspNet 会在手臂上
+  #   提议抓取（曾出现抓取中心 z=0.217m 的"空中假目标"）。
+  #   现把相机移到工作区 -y 侧的侧上方、俯角 60°：机械臂（沿 +x 伸入、y≈0）不再
+  #   与视线共轴，物体从侧上方被观察，还能看到物体的侧面（对 GraspNet 更友好）。
+  #
+  # 该位姿由"光轴对准工作区中心 (0.42, 0, 0)"解出，并核算过覆盖与分辨率：
+  #   world y 覆盖 [-0.42, 0.69] ⊃ ROI y ±0.34；world x 覆盖 [-0.21, 1.05] ⊃ ROI x[0.18,0.58]
+  #   光轴斜距 1.10m，分辨率 1.98 mm/px（50mm 物体约 25px，与改前 29px 相当）
   mount_pose:
-    x: 0.47
-    y: 0.0
+    x: 0.42
+    y: -0.5485
     z: 0.95
     roll: 0.0
-    pitch: 1.5707963           # 绕 Y 轴 90 度 -> 光轴朝下
-    yaw: 0.0
+    pitch: 1.0471976          # 绕 Y 轴 60° -> 光轴朝下俯视 60°
+    yaw: 1.5707963            # 绕 Z 轴 90° -> 从 -y 侧看向 +y
 
 # ---------- 话题 ----------
 topics:
-  image_raw: /camera/image_raw
+  image_raw: /camera/image_raw               # 相机彩色图（演示可视化用）
   depth_image: /camera/depth/image_raw
   camera_info: /camera/camera_info
-  point_cloud: /camera/points
-  detections: /sorting/detections        # 2D 检测/分割结果
-  targets: /sorting/targets              # 带三维定位结果的目标
-  grasp_candidates: /sorting/grasp_candidates
+  point_cloud: /camera/points                # 原始点云（相机 body 系）
   ground_truth: /sorting/ground_truth
   statistics: /sorting/statistics
   task_status: /sorting/task_status
-  detection_image: /sorting/detection_image
 
 # ---------- 服务 ----------
 services:
   start_sorting: /sorting/start_sorting
   reset_scene: /sorting/reset_scene
-  plan_grasp: /sorting/plan_grasp
-  execute_pick_place: /sorting/execute_pick_place
 
 # ---------- 分拣场景 ----------
 scene:
@@ -77,25 +84,14 @@ scene:
     - zone_b
     - zone_c
     - zone_d
-  bin_pose_x: 0.66
-  bin_pose_y: [-0.27, -0.09, 0.09, 0.27]
 
-# ---------- 抓取策略 ----------
+# ---------- 抓取约束 ----------
+# 抓取位姿不再由手写几何规则生成，而是直接来自 GraspNet 的 6DoF 输出（见 graspnet 段）；
+# 这里只保留"夹爪能抓什么"的物理约束与分拣箱几何。
 grasp:
-  pregrasp_height: 0.12        # 预抓取点相对抓取点的高度（米）
-  lift_height: 0.15            # 抬升高度（米）
-  place_height: 0.10           # 放置点相对分拣区底面的高度（米）
-  tcp_length: 0.105            # panda_link8 -> 指尖 的距离（米）
-  # 夹取高度由两个几何约束共同决定（见 grasp_planner_node）：
-  #   手掌约束：link8 不能低于 物体顶面 + palm_offset（否则手掌碰撞体会压到物体顶部）
-  #   指尖约束：指尖不能低于 物体底面 + fingertip_min_margin（否则指尖会扎进桌面）
-  # 夹取高度取两者中较高者，从而在"手掌不碰物体"的前提下让手指尽量多包住物体。
-  palm_offset: 0.066           # panda_link8 到手掌碰撞体最低点的距离（米）
-  palm_clearance: 0.003        # 手掌相对物体顶面的安全间隙（米）
-  fingertip_min_margin: 0.006  # 指尖相对物体底面的最小高度（米）
-  max_grasp_width: 0.078       # 夹爪最大开口（米）
+  max_grasp_width: 0.078       # 夹爪最大开口（米），所需开口超过该值的抓取直接筛除
   min_grasp_width: 0.008       # 夹爪最小开口（米）
-  bin_base_thickness: 0.008    # 分拣箱底板厚度（米），决定放置高度基准
+  bin_base_thickness: 0.008    # 分拣箱底板厚度（米），决定分拣箱碰撞体高度基准
 
 # ---------- 运动规划 ----------
 motion:
@@ -106,11 +102,11 @@ motion:
   accel_scaling: 0.25
   approach_velocity_scaling: 0.10   # 接近目标时降速
   cartesian_velocity_scaling: 0.10  # 直线插补（下降/抬升/放置）速度比例
-  goal_position_tolerance: 0.006    # 位姿约束容差（米）
-  goal_orientation_tolerance: 0.08  # 姿态约束容差（弧度）
+  goal_position_tolerance: 0.010    # 位姿约束容差（米）：放宽以缓解 99999 不可达
+  goal_orientation_tolerance: 0.12  # 姿态约束容差（弧度）：放宽以缓解 99999 不可达
   # 单次规划时间与尝试次数：过大会显著拉长单次抓取周期
-  planning_time: 2.0
-  planning_attempts: 3
+  planning_time: 3.0
+  planning_attempts: 10             # 多次尝试可显著降低 OMPL 偶发失败（99999）
   home_joint_values: [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785]
   observe_joint_values: [0.0, -0.35, 0.0, -2.0, 0.0, 1.65, 0.785]
 
@@ -121,42 +117,119 @@ gripper:
   joint_names: [panda_finger_joint1, panda_finger_joint2]
   state_joint: panda_finger_joint1
   open_effort: 6.0           # 张开力矩（牛顿，正值张开）
-  close_effort: 16.0         # 夹持力矩（牛顿，实际下发 -close_effort）
+  close_effort: 16.0         # 闭合力矩（牛顿，实际下发 -close_effort）：轻触贴合物体，避免撞偏
+  hold_effort: 30.0          # 保持力矩（牛顿）：抓取确认后的搬运保持力，抵抗抬升加速度造成的滑脱
   effort_sign: -1.0          # 闭合方向符号（-1 表示负力矩使手指靠拢）
   open_position: 0.038       # 完全张开时的关节位置
   grasp_threshold: 0.006     # 闭合后关节位置大于该值 => 判定夹住了物体
   command_settle_time: 0.7   # 下发指令后等待物理稳定的时间
-  max_close_time: 1.2        # 闭合最大等待时间
+  max_close_time: 2.4        # 闭合最大等待时间（阶梯加载总时长，翻倍即闭合速度减半）
 
-# ---------- 视觉 ----------
-vision:
-  backend: yolo                # yolo | classical
-  model_path: ""               # 空则使用 <workspace>/models/best.pt
-  conf_threshold: 0.45
-  iou_threshold: 0.5
-  device: "0"                  # "" = CPU, "0" = GPU
-  max_detections: 20
-  # 检测结果面积过滤（像素）：分拣箱等大色块会被颜色分割误检为目标，用面积上限剔除
-  max_mask_area: 6000
-  min_mask_area: 120
-  # 深度采样窗口（像素），取窗口内有效深度中位数
-  depth_window: 9
-  # 颜色分割后端参数：桌面为中性灰，高饱和度阈值可有效区分彩色目标
-  min_saturation: 150
-  hue_tolerance: 14
-  # 目标必须高于桌面的最小高度（米）：低于该值的三维点判为桌面/地面，直接剔除
-  min_object_height: 0.012
-  # 掩码质心深度有效范围（米）
-  min_depth: 0.2
-  max_depth: 2.0
+# ---------- 点云预处理（sorting_perception）----------
+# 处理链结论来自 Gate1–3 验证：合成场景中桌面占比 ~99%，且俯视相机存在机械臂自遮挡，
+# 必须先做"ROI+高度夹层裁剪 + 桌面平面剔除"才能让抓取网络采样到物体。
+perception:
+  output_cloud: /sorting/workspace_cloud    # 预处理后的工作区点云（供抓取网络）
+  output_markers: /sorting/clusters         # 聚类可视化（供 rviz）
+  # 高度夹层：相对桌面上表面的上下界（米），用于剔除桌面下方与高处机械臂
+  z_below_table: -0.03
+  # 0.25 -> 0.12：项目最高 SKU 是 blue_cylinder 高 80mm（yellow_box 65 / red_cube 50 /
+  # green_bar 30），原 0.25 留了 3 倍余量，把机械臂自己也圈了进来。实测失败后机械臂
+  # 停在预抓取位 (0.308,-0.085,0.246)，手正好落在 ROI 顶边内 -> 被聚成"物体" ->
+  # GraspNet 在机械臂上提议抓取 -> 抓取中心 z=0.217m 的空中假目标 -> 闭合夹空气空抓。
+  # 0.12 对最高物体仍留 40mm 余量，同时把手（z≈0.20+）与空中伪点排除在外。
+  z_above_table: 0.12
+  # RANSAC 平面分割
+  plane_distance_threshold: 0.008
+  plane_max_trials: 60
+  plane_fit_points: 6000                    # 拟合平面时的降采样点数（控制耗时）
+  # DBSCAN 欧式聚类
+  cluster_eps: 0.022
+  cluster_min_points: 30
+  # 聚类后过滤：点数与包围盒尺寸范围
+  min_cluster_points: 250
+  max_cluster_points: 200000
+  max_cluster_extent: 0.30
 
-# ---------- 任务调度 ----------
-task:
-  use_closed_loop: true        # 是否启用抓取前二次视觉校正
-  max_retries_per_target: 2    # 单个目标最大重试次数
-  target_select_strategy: nearest_to_center   # nearest_to_center | highest_confidence
-  refine_tolerance: 0.015      # 二次校正后位置偏差阈值（米）
-  settle_time: 1.5             # 等待物理稳定时间（秒）
+# ---------- 6DoF 抓取检测（GraspNet，sorting_grasp_planning）----------
+graspnet:
+  # 第三方代码目录（可用环境变量 GRASPNET_REPO 覆盖）
+  repo_root: /home/yang/robot_sorting_project/third_party/graspnet-baseline
+  checkpoint: ""                            # 空 -> <repo_root>/checkpoint-rs.tar
+  device: cuda:0
+  num_point: 20000                          # 送网络的采样点数
+  min_input_points: 500                     # 少于该点数跳过推理
+  score_threshold: 0.15                     # 抓取评分下限（Gate3 实测合成场景分数中位约 0.16）
+  max_grasps: 100                           # 发布的最大抓取数（按分排序）
+  # 接近方向上限（度）：与"竖直向下"的夹角。GraspNet 训练于侧视堆叠场景，
+  # 会提出大量侧向抓取；本项目末端为垂直下抓，需按此阈值筛除。180 = 不过滤。
+  # 30→15→22→16（Step1 单变量链）：
+  #   30° 指尖 z=37mm，高出 30mm 的 green_bar 顶面 7mm -> 必然空抓（已实测）；
+  #   15° 几何对了但"≤15° 候选为 0"（当时点云被机械臂/伪簇污染，已改 ROI 修好）；
+  #   22° 恢复了候选，但可抓深度只剩 30-(5+53.7·sin22°)=4.9mm，实测只重叠 2mm -> 空抓；
+  #   16° 可抓深度 = 30-(5+53.7·sin16°) = 10.2mm，是本物体能夹牢的下限附近。
+  # 算术依据：手指长 53.7mm，倾斜 θ 时手指盒最低角点比指尖低 53.7·sinθ，
+  #   故"可抓深度 = 物体高 - (桌面余量 + 53.7·sinθ)"，需 ≳10mm 才夹得稳。
+  max_approach_deg: 16
+  # 夹爪开口安全边距（米）：所需开口须 ≤ 物理最大开口 - 该值，避免"刚好卡满"闭合失败
+  width_safety_margin: 0.01
+  # 抓取中心与最近聚类质心的最大允许偏差（米）：超出说明指尖去怼物体边缘，直接丢弃
+  # 0.03 -> 0.06：green_bar 长 100mm，抓端部时抓取中心距质心本就有 30~45mm，
+  #   30mm 的门会系统性误杀所有端部抓取。实测 16° 限角下有 7/81 帧出现
+  #   "接近角≤16° 1~5 个候选 -> 质心≤30mm 0"，即幸存者全被这个门清零。
+  #   该门本身也不可靠（点云簇质心偏 ~7mm、尺寸外扩近一倍），候选质量现在
+  #   由规划层兜底：场景物体盒 + scene_object_margin 会把"指尖撞桌/撞物体"
+  #   的候选带接触深度信息地显式拒绝（已实测两次）。
+  cluster_center_tol: 0.06
+  # 规划场景中物体碰撞盒的安全余量（米，**每边**）。
+  # 背景：夹爪下压能否干净通过，取决于指面与物体侧面的最小余量。实测一个候选
+  # 只剩 1.30mm 余量时，MoveIt 判"含碰撞 100%"是**正确的**（确实没碰），但物理
+  # 引擎的接触容差 + 真值快照时序抖动把这 1.3mm 抹平，下压瞬间变成硬接触 ->
+  # panda_arm_controller 报 PATH_TOLERANCE_VIOLATED（MoveIt 错误码 -4）。
+  # 给物体盒每边加该余量，使这类"贴边候选"在**规划层**被直接拒掉。
+  # 仅作用于世界系（下压前）副本；已附着到夹爪上的副本按真实尺寸建模，
+  # 避免搬运/投放阶段被误判为碰撞。
+  scene_object_margin: 0.003
+  # 时序累积（秒）：静态场景下 GraspNet 单帧只对部分物体提出抓取，累积可补齐覆盖。0=关闭
+  accumulate_window: 3.0
+  dedupe_voxel: 0.02                        # 累积去重的体素边长（米）
+  infer_period: 1.0                         # 最小推理间隔（秒）
+  input_cloud: /sorting/workspace_cloud     # 输入：相机光学系工作区点云
+  output_grasps: /sorting/graspnet_grasps   # 输出：world 系 6DoF 抓取数组
+  output_markers: /sorting/graspnet_markers # 输出：rviz 可视化
+  # ---- 抓取执行（sorting_motion_control/graspnet_pick_place_node）----
+  # tcp_offset：panda_link8 到"抓取中心"的**名义**后退距离（米）。
+  #   GraspNet 的 translation 为两指之间的抓取中心，link8 沿 -approach 后退该距离。
+  #   Step1 起不再把此常量直接当最终值：执行节点会对每个候选按下述几何做逐候选补偿。
+  # tcp_length：link8 到"裸指指尖"沿轴向的距离（米），由 URDF 推导：
+  #   手指关节原点 0.0584 + 手指盒高 0.0537 = 0.1121（供诊断把中心换算成指尖落点）。
+  # 【逐候选补偿（Step1）】单一全局值无法同时满足"偏低插桌"与"偏高空抓"：
+  #   tcp_offset=0.090 -> 张开手指的碰撞盒角点插进桌面，被 work_table 拦停
+  #                      （实测接触 work_table<->panda_leftfinger，侵入 4~11mm）；
+  #   tcp_offset=0.115 -> 抓取中心偏高的候选又变成夹爪闭合在空气里 => 空抓。
+  # 做法：按候选姿态精确计算手指碰撞盒 16 个角点中最低者的世界 z，解出使该最低点
+  #   恰好位于"桌面 + table_clearance_margin"之上的最小 tcp_offset，与名义值取大者，
+  #   并夹在 [tcp_offset, tcp_offset_max] 内。中心偏低的候选会自动被抬升。
+  tcp_offset: 0.100
+  tcp_offset_max: 0.160                     # 逐候选抬升的上限（米），防止过度回退成空抓
+  table_clearance_margin: 0.005             # 手指盒最低角点与桌面的最小允许间隙（米）
+  tcp_length: 0.1121
+  pregrasp_retreat: 0.12                    # 预抓取点沿 approach 的后退距离（米）
+  lift_retreat: 0.15                        # 抬升沿 approach 的后退距离（米）
+  # 单物体尝试上限 + 物体分组半径（GraspNet 无物体 ID，按空间邻近聚成物体组后限次）
+  max_attempts_per_object: 2
+  object_cluster_radius: 0.03
+  # 候选预筛查：对每组前 N 个候选先做"无碰撞逆解"预检，把可达候选排到前面。
+  # 物体靠得近时最高分候选常被邻物挡住，预筛可避免只试前 2 个高分候选就误判不可抓。
+  candidate_screen_topk: 8
+  # 下压段碰撞开关：false=放开下压这一短直线段的碰撞检测。目标物体本身是规划场景
+  # 障碍物，夹爪靠近到可夹取距离时手指必然与目标接触，若开启则下压必然失败。
+  # 仅放开下压段；预抓取/抬升/搬运仍严格避障。
+  descent_avoid_collisions: false
+  max_empty_rounds: 3                       # 连续模式：连续多少轮无候选才判定任务结束
+  # 投放点（world 系）。方案A 下线框/类别已移除，暂用单一投放区；
+  # 后续如需按类别分区，需先恢复分类能力，再改为按类别选投放点。
+  drop_pose: [0.66, 0.0, 0.22]
 
 # ---------- 评估 ----------
 evaluation:

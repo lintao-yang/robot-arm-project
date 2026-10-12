@@ -6,7 +6,7 @@
 #     1. WSL 终端 A: bash scripts/run_sorting.sh gui:=false
 #     2. WSL 终端 B: bash scripts/run_visualization.sh
 #     3. Windows: 打开 Foxglove Studio -> "打开连接" -> Rosbridge -> ws://localhost:9090
-#        推荐面板: 3D(机器人+TF) / Image(/camera/image_raw 与 /sorting/detection_image)
+#        推荐面板: 3D(机器人+TF+/sorting/graspnet_markers 抓取可视化) / Image(/camera/image_raw)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export WORKSPACE_DIR="${WORKSPACE_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 # shellcheck source=env.sh

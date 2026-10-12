@@ -20,7 +20,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'grasp_planner_node = sorting_grasp_planning.grasp_planner_node:main',
+            'graspnet_planner_node = '
+            'sorting_grasp_planning.graspnet_planner_node:main',
         ],
     },
 )
