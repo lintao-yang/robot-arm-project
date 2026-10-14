@@ -102,7 +102,14 @@ class GraspNetPlannerNode(Node):
         self.width_range = (min_w, max_w - self.width_margin)
         # 抓取中心与点云聚类质心的最大偏差：超出则说明指尖去怼物体边缘，直接丢弃
         self.cluster_center_tol = float(gcfg.get('cluster_center_tol', 0.03))
+        # 高度是否夹进"抓取深度安全带"（见 _recenter_to_cluster）；关掉则完全用 GraspNet 高度
+        self.recenter_z = bool(gcfg.get('recenter_z', True))
+        # 抓取深度安全带：夹取点至少离顶面 min_depth（避免贴顶空抓），
+        # 至多离顶面 max_depth（避免插入过深导致够不着/撞邻物）
+        self.grasp_min_depth = float(gcfg.get('grasp_min_depth', 0.010))
+        self.grasp_max_depth = float(gcfg.get('grasp_max_depth', 0.030))
         self._centroids = []
+        self._centroid_extents = []
         self.min_points = int(gcfg.get('min_input_points', 500))
         self.infer_period = float(gcfg.get('infer_period', 1.0))
 
@@ -140,15 +147,18 @@ class GraspNetPlannerNode(Node):
 
     # ------------------------------------------------------------------
     def _on_clusters(self, msg: MarkerArray):
-        """缓存聚类质心（预处理节点发布的 CUBE marker 位置即簇质心）。"""
+        """缓存聚类质心与包围盒尺寸（CUBE marker：位姿=质心，scale=尺寸）。"""
         centroids = []
+        extents = []
         for marker in msg.markers:
             if marker.type == Marker.CUBE and marker.action == Marker.ADD:
                 centroids.append((marker.pose.position.x,
                                   marker.pose.position.y,
                                   marker.pose.position.z))
+                extents.append((marker.scale.x, marker.scale.y, marker.scale.z))
         if centroids:
             self._centroids = centroids
+            self._centroid_extents = extents
 
     def _infer(self, pts_optical: np.ndarray):
         torch = self.torch
@@ -357,7 +367,8 @@ class GraspNetPlannerNode(Node):
         修正把水平面内两个方向都对齐到簇质心，因此：
           * 闭合方向上落到物体中线 —— 两指对称跨夹，不再压本体；
           * 沿物体长度方向也回到质心 —— 避免 GraspNet 的端部/边缘落点导致夹边滑落。
-        竖直高度保持不变（由 tcp_offset 补偿单独负责桌面间隙）。
+        竖直高度**不强行拉到中线**（那样对矮物体要"插入过深"、会够不着或撞邻物），
+        而是夹进"抓取深度安全带"：至少离顶面 min_depth、至多离顶面 max_depth。
         """
         if not self._centroids or len(centers) == 0:
             return centers, 0.0
@@ -373,6 +384,20 @@ class GraspNetPlannerNode(Node):
                                   centers[i, 1] - centroids[nearest][1]))
             out[i, 0] = centroids[nearest][0]
             out[i, 1] = centroids[nearest][1]
+            # 高度也回到簇质心（物体竖直中线）：GraspNet 常把抓取中心提议在物体
+            # **上边缘**附近，指尖随之贴顶下压 -> 实测会夹空并把物体顶飞。回到中线后
+            # 两指在物体中部对称跨夹，既夹得稳、又不会顶到顶面把物体撞跑。
+            if self.recenter_z and nearest < len(self._centroid_extents):
+                # 不强行拉到竖直中线（那样"插入过深"）：改为把高度夹进安全带。
+                # 上界 = 顶面 - min_depth：保证至少夹住 min_depth 深，避免贴顶空抓；
+                # 下界 = 顶面 - max_depth：限制最大插入深度，避免插太深够不着/撞邻物。
+                centroid_z = float(centroids[nearest][2])
+                height = float(self._centroid_extents[nearest][2])
+                top = centroid_z + 0.5 * height
+                z_hi = top - self.grasp_min_depth
+                z_lo = top - min(self.grasp_max_depth,
+                                 max(0.5 * height, self.grasp_min_depth))
+                out[i, 2] = float(min(max(float(centers[i, 2]), z_lo), z_hi))
             shifts.append(step)
         return out, (float(np.mean(shifts)) * 1000.0 if shifts else 0.0)
 

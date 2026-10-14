@@ -15,6 +15,7 @@ from moveit_msgs.msg import (
     MotionPlanRequest,
     OrientationConstraint,
     PlanningOptions,
+    PlanningSceneComponents,
     PositionConstraint,
     RobotState,
 )
@@ -22,6 +23,7 @@ from moveit_msgs.srv import (
     GetCartesianPath,
     GetPositionFK,
     GetPositionIK,
+    GetPlanningScene,
     GetStateValidity,
 )
 from moveit_msgs.msg import PositionIKRequest
@@ -103,6 +105,7 @@ class MoveGroupClient:
         self._validity_client = node.create_client(GetStateValidity, '/check_state_validity')
         self._fk_client = node.create_client(GetPositionFK, '/compute_fk')
         self._ik_client = node.create_client(GetPositionIK, '/compute_ik')
+        self._scene_get_client = node.create_client(GetPlanningScene, '/get_planning_scene')
         self._server_ready = False
 
     # ------------------------------------------------------------------
@@ -477,9 +480,9 @@ class MoveGroupClient:
                        avoid_collisions: bool = True):
         """沿直线插补运动到给定路点（用于下降抓取、垂直抬升与放置）。
 
-        ``avoid_collisions=False`` 专供"下压抓取"这一短直线段：目标物体本身已被注册
-        为规划场景障碍物，若此处仍做碰撞检测，夹爪永远无法靠近到可夹取距离
-        （手指必然与目标"接触"），下压必然失败。其余阶段保持 True，防撞桌/撞邻物。
+        各阶段（含下压抓取）统一用 ``avoid_collisions=True``："夹爪 <-> 当前目标物体"
+        的必然接触由动态 ACM 在规划前显式豁免（见节点 _acm_set_target），因此下压
+        不再需要整体关闭碰撞检测，仍会防撞桌、防扫到邻物。
 
         相比 OMPL 的位姿目标，直线运动不会产生"先横移再抬升"之类的绕行路径，
         是抓取/放置阶段避免把物体拖掉或撞飞的关键。
@@ -534,3 +537,31 @@ class MoveGroupClient:
         if code == MOVEIT_SUCCESS:
             return True, f'ok (fraction={response.fraction:.2f})'
         return False, f'轨迹执行 MoveIt 错误码 {code}'
+
+    # ------------------------------------------------------------------
+    # Allowed Collision Matrix（ACM）
+    # ------------------------------------------------------------------
+    def get_allowed_collision_matrix(self, timeout: float = 5.0):
+        """读取 move_group 当前的**完整** ACM，返回 ``(entry_names, entry_values)``。
+
+        entry_values 为与 entry_names 同序的方阵（``list[list[bool]]``，True=允许碰撞）；
+        服务不可用或超时返回 None。
+
+        为什么要读全量：对 ACM 必须做**增量**修改（只改夹爪-目标物体那几项）后整体写回。
+        若只发送少数条目，会被 move_group 当作整体替换，抹掉机器人原有的自碰撞豁免
+        （相邻连杆、指垫等），使机械臂被判为自碰撞而完全无法运动——本项目已踩过该坑。
+        """
+        if not self._scene_get_client.wait_for_service(timeout_sec=timeout):
+            return None
+        request = GetPlanningScene.Request()
+        request.components.components = PlanningSceneComponents.ALLOWED_COLLISION_MATRIX
+        future = self._scene_get_client.call_async(request)
+        if not self._wait(future, timeout):
+            return None
+        response = future.result()
+        if response is None:
+            return None
+        matrix = response.scene.allowed_collision_matrix
+        names = list(matrix.entry_names)
+        values = [list(entry.enabled) for entry in matrix.entry_values]
+        return names, values

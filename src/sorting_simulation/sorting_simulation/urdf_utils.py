@@ -124,11 +124,16 @@ def inject_inertials(urdf_xml: str) -> str:
 # 依据官方 finger.stl 实测包围盒：x∈[-0.0105,0.0105]，y∈[0,0.0264]，z∈[0,0.0538]。
 # 使用原语碰撞体可以：1) 规避部分环境下 package:// 网格解析失败导致"无碰撞体"的隐患；
 # 2) 让 ODE 接触计算更稳定（网格-网格接触容易出现穿透）。
-FINGER_BOX = (0.021, 0.0265, 0.0537)
+# 【主动变薄】闭合轴(y)方向由真实 26.5mm 缩到 10mm：真实 Franka 手指沿闭合轴有
+# 26.5mm 厚度，在紧邻布局下手指本体必然插进邻居、导致下压不可达。仿真里 MoveIt 规划
+# 场景与 Gazebo 物理用同一份 URDF 生成的同一碰撞盒，故改薄后两边一致、确实能塞进更小的
+# 缝；代价是偏离真实夹爪几何，真机迁移会失效（与 system.yaml 的 layout.gap 配套）。
+# origin 的 y 取盒厚一半，保证手指**接触面仍落在关节平面 y=0**（不改变夹持基准）。
+FINGER_BOX = (0.021, 0.010, 0.0537)
 # 左手指导轨沿 +y 偏移，右手指导轨在原描述中绕 z 旋转 180°（即镜像到 -y）
 FINGER_BOX_ORIGIN = {
-    'panda_leftfinger': (0.0, 0.0132, 0.0269),
-    'panda_rightfinger': (0.0, -0.0132, 0.0269),
+    'panda_leftfinger': (0.0, 0.005, 0.0269),
+    'panda_rightfinger': (0.0, -0.005, 0.0269),
 }
 FINGER_LINKS = ('panda_leftfinger', 'panda_rightfinger')
 

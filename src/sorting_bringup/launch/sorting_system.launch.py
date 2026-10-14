@@ -78,6 +78,16 @@ def generate_launch_description():
         additional_env=VENV_ENV,
     )
 
+    # YOLOv8-seg 2D 分割：把 DBSCAN 会合并的紧邻多物体在 2D 上分成实例，
+    # 结果压成"逐像素类别标签图"供 pointcloud_preprocessor 拆分合并簇。
+    yolo_seg = Node(
+        package='sorting_perception',
+        executable='yolo_seg_node',
+        output='screen',
+        parameters=[{'use_sim_time': use_sim_time}],
+        additional_env=VENV_ENV,
+    )
+
     pick_place = Node(
         package='sorting_motion_control',
         executable='graspnet_pick_place_node',
@@ -98,6 +108,7 @@ def generate_launch_description():
             simulation,
             move_group,
             preprocessor,
+            yolo_seg,
             graspnet_planner,
             pick_place,
             metrics_logger,

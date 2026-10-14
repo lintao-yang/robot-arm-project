@@ -46,7 +46,13 @@ from rclpy.node import Node
 from std_msgs.msg import String
 from visualization_msgs.msg import Marker, MarkerArray
 
-from moveit_msgs.msg import AttachedCollisionObject, CollisionObject, PlanningScene
+from moveit_msgs.msg import (
+    AllowedCollisionEntry,
+    AllowedCollisionMatrix,
+    AttachedCollisionObject,
+    CollisionObject,
+    PlanningScene,
+)
 from moveit_msgs.srv import ApplyPlanningScene
 from sensor_msgs.msg import JointState
 from shape_msgs.msg import SolidPrimitive
@@ -73,17 +79,17 @@ DEFAULT_TCP_LENGTH = 0.1121
 # ---------------------------------------------------------------------------
 # 手指碰撞盒几何（与 sorting_simulation.urdf_utils.simplify_finger_collision 替换后
 # 的真实碰撞体一致，勿随意改）：
-#   FINGER_BOX       = (0.021, 0.0265, 0.0537)   —— 碰撞盒尺寸（x, y, z）
+#   FINGER_BOX       = (0.021, 0.010, 0.0537)   —— 碰撞盒尺寸（x, y, z），y 已主动变薄
 #   FINGER_BOX_ORIGIN                            —— 盒中心相对手指关节原点的偏移
 #   FINGER_JOINT_Z   = 0.0584                    —— panda_finger_joint 的 origin z
 #   HAND_Z_ROT       = -pi/4                     —— panda_hand 相对 panda_link8 的安装角
 # 为什么需要它：判断"下压会不会碰到桌面"要看手指**碰撞盒的 8 个角点**里最低的那个，
 # 而不是沿 approach 的指尖点——夹爪倾斜时盒角会比指尖点更低，实测缺口可达 ~23mm。
 # ---------------------------------------------------------------------------
-FINGER_BOX_SIZE = (0.021, 0.0265, 0.0537)
+FINGER_BOX_SIZE = (0.021, 0.010, 0.0537)
 FINGER_BOX_ORIGIN = {
-    'left': (0.0, 0.0132, 0.0269),
-    'right': (0.0, -0.0132, 0.0269),
+    'left': (0.0, 0.005, 0.0269),
+    'right': (0.0, -0.005, 0.0269),
 }
 FINGER_JOINT_Z = 0.0584
 HAND_Z_ROT = -math.pi / 4.0
@@ -280,10 +286,14 @@ class GraspNetPickPlaceNode(Node):
         # 物体靠得近时，最高分候选的下压路径常被邻物挡住；不预筛时只试前 2 个高分候选
         # 会全部失败并误判物体不可抓（见 _screen_candidates）。
         self.candidate_screen_topk = int(gcfg.get('candidate_screen_topk', 8))
-        # 下压段碰撞开关：False=放开。目标物体本身是规划场景障碍物，夹爪靠近到可夹取
-        # 距离时手指必然与目标接触，若开启检测则下压必然失败（见 move_cartesian）。
-        # 仅放开这条短直线段，预抓取/抬升/搬运仍严格避障。
-        self.descent_avoid_collisions = bool(gcfg.get('descent_avoid_collisions', True))
+        # 动态 ACM：规划前只把"夹爪连杆 <-> 当前目标物体"设为允许碰撞，其余
+        # （夹爪<->其他物体/桌面、手臂<->一切）一律保持严格；抓取结束（成功或失败）
+        # 后立即恢复基线。这样下压段可以放心地用 avoid_collisions=True，不再需要
+        # 整体关闭碰撞检测。列表为实际会与目标接触的夹爪连杆。
+        self.acm_gripper_links = list(gcfg.get('acm_gripper_links', [
+            'panda_leftfinger', 'panda_rightfinger',
+            'panda_leftfinger_pad', 'panda_rightfinger_pad',
+        ]))
         # 把无物体 ID 的抓取候选按空间邻近聚成"物体组"的半径（米）
         self.object_cluster_radius = float(gcfg.get('object_cluster_radius', 0.03))
         # 连续模式下，单轮拿不到抓取候选时不立即收工：冷启动/瞬时遮挡都可能出现空帧，
@@ -339,6 +349,9 @@ class GraspNetPickPlaceNode(Node):
         self._gt_zones = {}
         self._scene_object_ids = set()
         self._attached_ids = set()
+        # 上次写入规划场景的物体位姿：用于判断物体是否移动；移动后必须重发 ADD，
+        # 否则规划场景/rviz 会一直停在旧位置，规划器对着幽灵物体规划导致卡死
+        self._scene_object_poses = {}
         # 世界系物体盒的安全余量（每边）：把"指面到物体的余量"不足的贴边候选
         # 在规划层拒掉，避免留到物理层变成硬接触（MoveIt -4）
         self.scene_object_margin = float(gcfg.get('scene_object_margin', 0.0))
@@ -588,6 +601,7 @@ class GraspNetPickPlaceNode(Node):
             self.get_logger().warn(f'attach 失败：{obj_id}')
             return False
         self._scene_object_ids.discard(obj_id)
+        self._scene_object_poses.pop(obj_id, None)
         self._attached_ids.add(obj_id)
         self.get_logger().info(f'已把 {obj_id} 附着到 {link_name}（抬升/搬运将不再判为碰撞）')
         return True
@@ -615,6 +629,20 @@ class GraspNetPickPlaceNode(Node):
         self._attached_ids.discard(obj_id)
         return True
 
+    def _pose_unchanged(self, obj_id, pose) -> bool:
+        """物体位姿相对"上次写入规划场景的位姿"是否基本未变（1e-4 容差）。"""
+        prev = self._scene_object_poses.get(obj_id)
+        if prev is None:
+            return False
+        dp = (abs(prev.position.x - pose.position.x)
+              + abs(prev.position.y - pose.position.y)
+              + abs(prev.position.z - pose.position.z))
+        dq = (abs(prev.orientation.x - pose.orientation.x)
+              + abs(prev.orientation.y - pose.orientation.y)
+              + abs(prev.orientation.z - pose.orientation.z)
+              + abs(prev.orientation.w - pose.orientation.w))
+        return dp < 1e-4 and dq < 1e-4
+
     def _sync_object_collision_objects(self):
         """把未抓取的待抓物体按真值同步进规划场景（每轮开始前调用）。
 
@@ -635,7 +663,9 @@ class GraspNetPickPlaceNode(Node):
                 # 已挂到夹爪上：世界系不应再有同名副本
                 continue
             wanted.add(obj_id)
-            if obj_id in self._scene_object_ids:
+            # 已在场景中且位姿未变 -> 无需重发；位姿变了（例如被空抓的夹爪顶飞）
+            # 必须重发 ADD 把新位姿写进去，否则 rviz/规划器一直停在旧位置
+            if obj_id in self._scene_object_ids and self._pose_unchanged(obj_id, pose):
                 continue
             obstacle = CollisionObject()
             obstacle.header.frame_id = 'world'
@@ -650,6 +680,7 @@ class GraspNetPickPlaceNode(Node):
             obstacle.primitive_poses.append(pose)
             obstacle.operation = CollisionObject.ADD
             scene.world.collision_objects.append(obstacle)
+            self._scene_object_poses[obj_id] = pose
 
         for obj_id in sorted(self._scene_object_ids - wanted):
             obstacle = CollisionObject()
@@ -657,6 +688,7 @@ class GraspNetPickPlaceNode(Node):
             obstacle.id = obj_id
             obstacle.operation = CollisionObject.REMOVE
             scene.world.collision_objects.append(obstacle)
+            self._scene_object_poses.pop(obj_id, None)
 
         if not scene.world.collision_objects:
             return
@@ -670,6 +702,72 @@ class GraspNetPickPlaceNode(Node):
                     f'规划场景物体同步：新增 {sorted(added)} 移除 {sorted(removed)}')
         else:
             self.get_logger().warn('规划场景物体同步失败')
+
+    def _acm_set_target(self, target_co_id) -> bool:
+        """动态刷新碰撞矩阵（ACM）：只豁免"夹爪连杆 <-> 目标物体"，其余保持严格。
+
+        ``target_co_id`` 为当前目标物体在规划场景里的碰撞体 ID（``pick_<name>``）；
+        传 None 表示**恢复基线**（夹爪对所有物体都禁止碰撞）。
+
+        实现（增量修改，务必读全量）：
+            1) 读 move_group 当前**完整** ACM；
+            2) 把夹爪连杆对**所有**物体的条目先清零（清掉上一轮残留）；
+            3) 若给了目标，则把夹爪连杆 <-> 该物体的条目标为允许碰撞；
+            4) 连同其余连杆条目一起整体写回（原有自碰撞豁免原样保留）。
+
+        只发少数条目会被 move_group 当作整体替换，抹掉机器人自碰撞豁免、使机械臂
+        完全无法运动——这是本项目此前 ACM 尝试失败的根因，因此这里始终读全量再写回。
+        """
+        current = self.moveit.get_allowed_collision_matrix()
+        if current is None:
+            self.get_logger().warn('[ACM] 无法读取当前碰撞矩阵，跳过豁免更新')
+            return False
+        names, values = current
+
+        # 参与更新的物体名 = 矩阵中已有的 pick_* ∪ 当前场景物体 ∪ 已附着物体 ∪ 目标
+        object_ids = {name for name in names if name.startswith('pick_')}
+        object_ids |= set(self._scene_object_ids) | set(self._attached_ids)
+        if target_co_id:
+            object_ids.add(target_co_id)
+
+        # 确保所有相关名称都在矩阵中（缺失则扩展方阵，新条目默认禁止碰撞）
+        for name in list(self.acm_gripper_links) + sorted(object_ids):
+            if name not in names:
+                names.append(name)
+                for row in values:
+                    row.append(False)
+                values.append([False] * len(names))
+
+        index = {name: idx for idx, name in enumerate(names)}
+        allowed_pairs = []
+        for obj_id in object_ids:
+            allow = bool(target_co_id) and obj_id == target_co_id
+            j = index[obj_id]
+            for link in self.acm_gripper_links:
+                i = index[link]
+                values[i][j] = allow
+                values[j][i] = allow
+                if allow:
+                    allowed_pairs.append(f'{link}<->{obj_id}')
+
+        matrix = AllowedCollisionMatrix()
+        matrix.entry_names = names
+        for row in values:
+            entry = AllowedCollisionEntry()
+            entry.enabled = [bool(value) for value in row]
+            matrix.entry_values.append(entry)
+
+        scene = PlanningScene()
+        scene.is_diff = True
+        scene.allowed_collision_matrix = matrix
+        if not self._apply_scene(scene):
+            self.get_logger().warn('[ACM] 碰撞矩阵写回失败')
+            return False
+        if allowed_pairs:
+            self.get_logger().info(f'[ACM] 豁免夹爪-目标接触: {", ".join(allowed_pairs)}')
+        else:
+            self.get_logger().info('[ACM] 已恢复基线：夹爪对所有物体禁止碰撞')
+        return True
 
     def _on_clusters(self, msg: MarkerArray):
         """缓存聚类质心与尺寸（CUBE marker：位姿=质心，scale=包围盒尺寸）。"""
@@ -1046,6 +1144,11 @@ class GraspNetPickPlaceNode(Node):
         groups.sort(key=lambda group: -float(group['grasps'][0].score))
         return groups
 
+    def _group_height(self, center) -> float:
+        """物体组的高度（米）：取最近簇的 z 方向尺寸；无簇数据时返回 0。"""
+        info = self._nearest_cluster(np.asarray(center, dtype=float))
+        return float(info[1][2]) if info is not None else 0.0
+
     def _is_blacklisted(self, center) -> bool:
         for blocked in self._blacklist:
             if float(np.linalg.norm(center - blocked)) <= self.object_cluster_radius:
@@ -1068,9 +1171,10 @@ class GraspNetPickPlaceNode(Node):
             except Exception:
                 infeasible.append(grasp)
                 continue
-            # 与下压段保持一致的碰撞模式：下压放开碰撞（False）时预筛也必须同模式，
-            # 否则会把"可抓但手指会接触目标"的候选全部误判为不可行。
-            ik = self.moveit.compute_ik(grasp_pose, avoid_collisions=self.descent_avoid_collisions)
+            # 预筛只做纯运动学可达性判断（不引入碰撞）：此时尚未确定目标物体、
+            # ACM 豁免还没建立，"含碰撞"会把"可抓但手指接触目标"的候选全部误杀。
+            # 真正的避障由下压规划在 ACM 就绪后判断。
+            ik = self.moveit.compute_ik(grasp_pose, avoid_collisions=False)
             if ik is None:
                 # 逆解服务不可用：不做筛查，退回原始顺序，避免误伤
                 return list(grasps)
@@ -1083,6 +1187,8 @@ class GraspNetPickPlaceNode(Node):
         返回 (是否成功, 本轮实际尝试的候选数)。attempted=0 表示当前无可用物体（全在黑名单）。
         """
         groups = self._group_grasps(grasps_msg.grasps)
+        # 抓取顺序：从最高物体到最矮物体
+        groups.sort(key=lambda group: -self._group_height(group['center']))
         attempted = 0
         for index, group in enumerate(groups):
             label = f'物体{chr(ord("A") + index)}'
@@ -1111,8 +1217,15 @@ class GraspNetPickPlaceNode(Node):
         return False, attempted
 
     def _execute_one(self, grasp):
+        """执行一次抓取；无论成功/失败，退出时都把 ACM 恢复基线（见 finally）。"""
+        try:
+            return self._execute_one_inner(grasp, time.time())
+        finally:
+            # 每轮抓取结束（含中途失败/异常）都清掉夹爪-目标豁免，保证下一轮 ACM 干净
+            self._acm_set_target(None)
+
+    def _execute_one_inner(self, grasp, start):
         """执行一次"预抓取->下降->闭合->抬升->搬运->释放"。返回 (是否成功, 说明)。"""
-        start = time.time()
         try:
             grasp_pose, approach, tcp_info = self.grasp_to_pose(grasp)
         except Exception as exc:
@@ -1120,6 +1233,12 @@ class GraspNetPickPlaceNode(Node):
 
         self._publish_execution_markers(grasp_pose, grasp)
         self._log_candidate_diagnostic(grasp, grasp_pose, approach, tcp_info)
+
+        # 选定本轮目标物体（离抓取中心最近的真值物体），规划前据此刷新 ACM：
+        # 只豁免"夹爪连杆 <-> 该物体"，其余物体/桌面/手臂一律保持严格。
+        object_name = self._nearest_gt_object(
+            (grasp.pose.position.x, grasp.pose.position.y, grasp.pose.position.z))
+        self._acm_set_target(f'pick_{object_name}' if object_name else None)
 
         pregrasp_pose = copy.deepcopy(grasp_pose)
         pregrasp_pose.position.x -= approach[0] * self.pregrasp_retreat
@@ -1148,9 +1267,11 @@ class GraspNetPickPlaceNode(Node):
         # 2) 沿 approach 直线下降到抓取位姿（两阶段规划的第二步）
         #    严格禁止"从当前位置直接规划到接触点"：直线插补不可达即放弃该候选，
         #    否则 OMPL 会生成绕行路径撞偏/顶飞物体（这正是"原地空转、来回扭"的来源）。
+        #    含碰撞检测（True）：手指与**目标物体**的必然接触已由上面的 ACM 豁免，
+        #    其余（桌面/邻物/自碰撞）仍严格拦截。
         ok, reason = self.moveit.move_cartesian(
             [grasp_pose], velocity=self.approach_velocity, max_step=0.003, timeout=30.0,
-            avoid_collisions=self.descent_avoid_collisions
+            avoid_collisions=True
         )
         if not ok:
             self.stats['plan_failures'] += 1
@@ -1176,8 +1297,6 @@ class GraspNetPickPlaceNode(Node):
         # 3b) 把刚夹住的物体从世界系挂到夹爪上。
         #     否则规划器会把"手上的物体"与"场景里同一物体的副本"判为碰撞，
         #     抬升轨迹直接被拒（实测 MoveIt -2 INVALID_MOTION_PLAN）。
-        object_name = self._nearest_gt_object(
-            (grasp.pose.position.x, grasp.pose.position.y, grasp.pose.position.z))
         attached = bool(object_name) and self._attach_object(object_name)
 
         # 4) 沿 approach 直线抬升（退离物体）

@@ -22,6 +22,10 @@ setup(
         'console_scripts': [
             'pointcloud_preprocessor = '
             'sorting_perception.pointcloud_preprocessor:main',
+            'dataset_capture = '
+            'sorting_perception.dataset_capture_node:main',
+            'yolo_seg_node = '
+            'sorting_perception.yolo_seg_node:main',
         ],
     },
 )

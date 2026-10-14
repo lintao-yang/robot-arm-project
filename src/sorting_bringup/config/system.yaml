@@ -64,13 +64,15 @@ scene:
     top_z: 0.0                 # 桌面上表面高度（米）
     size: [0.70, 0.80, 0.05]
     pose: [0.42, 0.0, -0.025]
-  # 物体随机摆放区域（在桌面上的矩形范围）
-  scatter:
-    x_min: 0.30
-    x_max: 0.52
-    y_min: -0.26
-    y_max: 0.26
-    min_separation: 0.085      # 物体间最小间距，用于降低遮挡
+  # 初始物体紧凑摆放：4 个物体按网格紧凑排列（columns 控制列数，4 个 -> 2x2），
+  # 相邻物体边界间距精确等于 gap（建议 0.5~2mm），无穿模/重叠；
+  # 物体平放（roll=pitch=0），底面贴合桌面，姿态稳定、无悬空/倾斜。
+  layout:
+    center_x: 0.40            # 集群中心 x（world 系，米）
+    center_y: 0.0             # 集群中心 y（world 系，米）
+    columns: 2                # 网格列数（4 个物体 -> 2x2）
+    gap: 0.040                # 相邻物体边界间距（米）。需满足 gap > 全开手指伸距 + 手指厚 + scene_object_margin
+    rest_clearance: 0.0005    # 落桌时底面与桌面的初始间隙（米），防止初始穿模
   # 机械臂工作区 ROI：只有落在这个范围内的目标才参与抓取
   # （分拣箱位于 ROI 之外，避免箱子本身被当作待抓取目标）
   workspace_roi:
@@ -181,6 +183,12 @@ graspnet:
   #   由规划层兜底：场景物体盒 + scene_object_margin 会把"指尖撞桌/撞物体"
   #   的候选带接触深度信息地显式拒绝（已实测两次）。
   cluster_center_tol: 0.06
+  # 高度处理：false = 完全采用 GraspNet 自身的高度判断（它会把抓取点提到物体上部
+  # 以避开窄缝，是训练得来的合理判断）；true = 用点云簇包围盒把高度夹进深度安全带
+  # （注意：点云簇包围盒在 z 方向会膨胀，顶面被高估，容易把抓取点顶到物体上方）。
+  recenter_z: false
+  grasp_min_depth: 0.010
+  grasp_max_depth: 0.030
   # 规划场景中物体碰撞盒的安全余量（米，**每边**）。
   # 背景：夹爪下压能否干净通过，取决于指面与物体侧面的最小余量。实测一个候选
   # 只剩 1.30mm 余量时，MoveIt 判"含碰撞 100%"是**正确的**（确实没碰），但物理
@@ -189,7 +197,7 @@ graspnet:
   # 给物体盒每边加该余量，使这类"贴边候选"在**规划层**被直接拒掉。
   # 仅作用于世界系（下压前）副本；已附着到夹爪上的副本按真实尺寸建模，
   # 避免搬运/投放阶段被误判为碰撞。
-  scene_object_margin: 0.003
+  scene_object_margin: 0.001
   # 时序累积（秒）：静态场景下 GraspNet 单帧只对部分物体提出抓取，累积可补齐覆盖。0=关闭
   accumulate_window: 3.0
   dedupe_voxel: 0.02                        # 累积去重的体素边长（米）
@@ -222,14 +230,46 @@ graspnet:
   # 候选预筛查：对每组前 N 个候选先做"无碰撞逆解"预检，把可达候选排到前面。
   # 物体靠得近时最高分候选常被邻物挡住，预筛可避免只试前 2 个高分候选就误判不可抓。
   candidate_screen_topk: 8
-  # 下压段碰撞开关：false=放开下压这一短直线段的碰撞检测。目标物体本身是规划场景
-  # 障碍物，夹爪靠近到可夹取距离时手指必然与目标接触，若开启则下压必然失败。
-  # 仅放开下压段；预抓取/抬升/搬运仍严格避障。
-  descent_avoid_collisions: false
+  # 动态 ACM（Allowed Collision Matrix）：规划前只把"夹爪连杆 <-> 当前目标物体"
+  # 设为允许碰撞，其余（夹爪<->其他物体/桌面、手臂<->一切）一律保持严格；抓取结束
+  # （成功或失败）后立即恢复基线。这样下压段可用 avoid_collisions=True，不再需要
+  # 整体关闭碰撞检测。列表为实际会与目标接触的夹爪连杆。
+  # 注意：ACM 修改必须基于 move_group 的**完整**碰撞矩阵做增量修改后整体写回，
+  # 只发少数条目会覆盖机器人自碰撞豁免，导致机械臂完全无法运动（已踩坑）。
+  acm_gripper_links:
+    - panda_leftfinger
+    - panda_rightfinger
+    - panda_leftfinger_pad
+    - panda_rightfinger_pad
   max_empty_rounds: 3                       # 连续模式：连续多少轮无候选才判定任务结束
   # 投放点（world 系）。方案A 下线框/类别已移除，暂用单一投放区；
   # 后续如需按类别分区，需先恢复分类能力，再改为按类别选投放点。
   drop_pose: [0.66, 0.0, 0.22]
+
+# ---------- YOLOv8-seg 合成数据集（sorting_perception/dataset_capture）----------
+# 采集相机 RGB，并用仿真真值自动标注实例多边形，训练 2D 分割模型。
+# 用途：把 DBSCAN 会合并成一团的紧邻多物体在 2D 上分成实例，供点云按类别拆分。
+dataset:
+  output_dir: datasets/yolo_seg   # 输出目录（相对工作空间根目录；也支持绝对路径）
+  num_images: 200                 # 采集张数；每张前都会 reset_scene 随机化，耗时可观
+  val_ratio: 0.15                 # 验证集比例
+  settle_time: 2.0                # reset 后等待场景稳定的时间（秒）
+  n_objects: 4                    # 每次摆放物体数（四种物体每种各一个）
+  min_area_px: 25.0               # 物体可见像素数下限，低于该值（几乎全被遮挡）则丢弃
+  jpeg_quality: 95
+
+# ---------- YOLOv8-seg 在线推理（sorting_perception/yolo_seg_node）----------
+# 用训练好的分割模型对 RGB 出实例掩码，合成"逐像素类别标签图"（mono8，0=背景，
+# class_id+1=对应类别）发布给点云预处理节点，用于把 DBSCAN 合并成团的簇按类别拆开。
+yolo_seg:
+  weights: runs/segment/sort_objects/weights/best.pt  # 训练产物（相对工作空间根）
+  device: 0                       # cuda 设备号；-1 表示 CPU
+  conf: 0.25                      # 置信度阈值
+  imgsz: 640                      # 推理输入尺寸
+  infer_period: 0.2               # 最小推理间隔（秒）
+  input_image: /camera/image_raw  # 输入：相机彩色图
+  output_label: /sorting/class_label_image  # 输出：逐像素类别标签图（mono8）
+  output_overlay: /sorting/seg_overlay      # 输出：彩色叠加图（调试可视化）
 
 # ---------- 评估 ----------
 evaluation:

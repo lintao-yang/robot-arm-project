@@ -408,7 +408,10 @@ class SceneManager(Node):
                     return
                 count = int(self.scene_cfg.get('n_objects', 4))
                 try:
-                    spawned = self._spawn_objects(count, randomize_class=True)
+                    # 初始摆放即满足"四种物体每种各一个"（不重复），槽位随机排列
+                    spawned = self._spawn_objects(
+                        count, randomize_class=False, randomize_layout=True
+                    )
                 except Exception as exc:
                     self.get_logger().error(f'初始物体生成异常: {exc}')
                     spawned = 0
@@ -438,38 +441,88 @@ class SceneManager(Node):
         self._bins_spawned = True
         self.get_logger().info(f'分拣箱由世界文件提供（{len(bins)} 个）')
 
-    def _spawn_objects(self, count: int, randomize_class: bool) -> int:
-        """清空旧物体并生成新的待分拣物体。"""
+    def _spawn_objects(self, count: int, randomize_class: bool,
+                       randomize_layout: bool = False) -> int:
+        """清空旧物体并按紧凑网格重新摆放待分拣物体。
+
+        摆放策略（对应"紧凑且不穿模"需求）：
+          * 物体排成 ncols 列网格；列宽 = 该列物体 x 尺寸最大值，
+            行高 = 该行物体 y 尺寸最大值。
+          * 同一列内物体对齐到列边界（第 0 列靠右、其余列靠左），
+            同一行内物体对齐到行边界（首行靠下、其余行靠上），
+            从而保证网格线两侧任意相邻物体的**边界间距严格等于 gap**
+            （默认 1.5mm，落在 0.5~2mm 合理区间），既紧凑又不重叠。
+          * 物体平放（roll=pitch=0、yaw=0），底面贴合桌面（仅留极小的
+            rest_clearance 防止初始穿模），姿态稳定、无悬空、无倾斜。
+        """
         for name in list(self._objects.keys()):
             self._delete_model(name)
         self._objects.clear()
         time.sleep(0.3)
 
-        scatter = self.scene_cfg['scatter']
+        layout = self.scene_cfg.get('layout', {})
         class_ids = self.class_table.class_ids
-        placed: List[np.ndarray] = []
-        spawned = 0
-        attempts = 0
         target = max(1, count)
+        ncols = max(1, int(layout.get('columns', 2)))
+        gap = float(layout.get('gap', 0.0015))
+        center_x = float(layout.get('center_x', 0.40))
+        center_y = float(layout.get('center_y', 0.0))
+        clearance = float(layout.get('rest_clearance', 0.0005))
 
-        while spawned < target and attempts < target * 40:
-            attempts += 1
-            position = np.array(
-                [
-                    self.rng.uniform(scatter['x_min'], scatter['x_max']),
-                    self.rng.uniform(scatter['y_min'], scatter['y_max']),
-                ]
-            )
-            if any(np.linalg.norm(position - p) < scatter.get('min_separation', 0.085)
-                   for p in placed):
-                continue
+        picks: List[int] = []
+        if randomize_class:
+            # 随机类别（可重复）：种类最多样，但可能出现同色相邻
+            picks = [int(self.rng.choice(class_ids)) for _ in range(target)]
+        elif randomize_layout:
+            # "每种各一个"但**槽位随机排列**：保证各类各一个、无同色相邻，同时让每帧的
+            # "类别->槽位"映射不同（配合相机/光照随机化提供帧间多样性，供合成数据集采集）。
+            # 网格几何与边界间隙保持不变。
+            permutation = [int(cid) for cid in self.rng.permutation(class_ids)]
+            while len(picks) < target:
+                picks.extend(permutation)
+            picks = picks[:target]
+        else:
+            picks = [int(class_ids[index % len(class_ids)]) for index in range(target)]
+        sizes = [self.class_table.size_of(cid) for cid in picks]
 
-            class_id = int(self.rng.choice(class_ids)) if randomize_class else int(class_ids[spawned % len(class_ids)])
-            size = self.class_table.size_of(class_id)
-            yaw = float(self.rng.uniform(0.0, 2.0 * math.pi))
-            name = f'sort_obj_{spawned}'
+        nrows = int(math.ceil(target / float(ncols)))
+        col_w = [0.0] * ncols
+        row_h = [0.0] * nrows
+        for index, size in enumerate(sizes):
+            col_w[index % ncols] = max(col_w[index % ncols], size[0])
+            row_h[index // ncols] = max(row_h[index // ncols], size[1])
+
+        total_w = sum(col_w) + gap * (ncols - 1)
+        total_h = sum(row_h) + gap * (nrows - 1)
+        left = center_x - total_w / 2.0
+        top = center_y + total_h / 2.0
+
+        col_left = []
+        cursor = left
+        for width in col_w:
+            col_left.append(cursor)
+            cursor += width + gap
+        row_top = []
+        cursor = top
+        for height in row_h:
+            row_top.append(cursor)
+            cursor -= height + gap
+
+        spawned = 0
+        for index, class_id in enumerate(picks):
+            col = index % ncols
+            row = index // ncols
+            size = sizes[index]
+            sx, sy, sz = size
+
+            x = (col_left[col] + col_w[col] - sx / 2.0 if col == 0
+                 else col_left[col] + sx / 2.0)
+            y = (row_top[row] - row_h[row] + sy / 2.0 if row == 0
+                 else row_top[row] - sy / 2.0)
+
+            name = f'sort_obj_{index}'
             rgba = self._randomized_rgba(class_id)
-            pose = [float(position[0]), float(position[1]), size[2] / 2.0 + 0.002, 0.0, 0.0, yaw]
+            pose = [float(x), float(y), float(sz / 2.0 + clearance), 0.0, 0.0, 0.0]
 
             sdf = self._object_sdf(
                 name, self.class_table.shape_of(class_id), size, rgba, pose
@@ -485,10 +538,11 @@ class SceneManager(Node):
                 'placement_zone': self.class_table.placement_zone_of(class_id),
                 'spawn_pose': pose,
             }
-            placed.append(position)
             spawned += 1
 
-        self.get_logger().info(f'已生成 {spawned} 个待分拣物体')
+        self.get_logger().info(
+            f'已按紧凑网格生成 {spawned} 个待分拣物体（边界间距 {gap * 1000:.1f}mm）'
+        )
         return spawned
 
     # ==================================================================
@@ -518,7 +572,9 @@ class SceneManager(Node):
                 self.scene_cfg.get('n_objects', 4)
             )
             try:
-                spawned = self._spawn_objects(count, bool(request.randomize_class))
+                spawned = self._spawn_objects(
+                    count, bool(request.randomize_class), bool(request.randomize_pose)
+                )
             except Exception as exc:  # 服务调用异常不应导致节点崩溃
                 self.get_logger().error(f'生成物体异常: {exc}')
                 response.success = False

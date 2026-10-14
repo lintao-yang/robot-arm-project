@@ -7,6 +7,8 @@
     3. RANSAC 平面分割：剔除桌面平面（合成场景中桌面占 ~99% 的点，
        不剔除则抓取网络采样不到物体）
     4. 离群点滤波 + DBSCAN 欧式聚类：把点云切成一个个物体簇
+    4b. 用 YOLO 类别标签图把 DBSCAN 因 1.5mm 紧邻而误合并的"多物体簇"按类别拆成
+        多个子簇（本项目约束"每类各一个"，故类别即实例）
     5. 发布：工作区点云(供抓取网络) + 聚类可视化 MarkerArray(供 rviz)
 
 算法实现复用成熟开源库：
@@ -24,7 +26,7 @@ from rclpy.qos import (
     QoSProfile,
     ReliabilityPolicy,
 )
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import Image, PointCloud2
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header
 from visualization_msgs.msg import Marker, MarkerArray
@@ -102,6 +104,27 @@ class PointCloudPreprocessor(Node):
         self.sub = self.create_subscription(
             PointCloud2, self.input_topic, self.on_cloud, qos
         )
+
+        # ---- YOLO 类别标签图：把 DBSCAN 合并的"紧邻多物体簇"按类别拆开 ----
+        # 背景：物体边界间隙仅 1.5mm，DBSCAN 会把 4 个物体连成一个簇，导致下游把整团
+        # 当作单个物体（候选塌缩、两次失败即整团拉黑）。YOLO 分割在 2D 上能分开它们，
+        # 这里把簇内每个 3D 点投影到像素、读类别标签，按类别分组 -> 一类别一组即一物体。
+        self.split_by_label = bool(self.pcfg.get('split_by_label', True))
+        self.split_min_points = int(self.pcfg.get('split_min_points', 30))
+        ycfg = cfg.get('yolo_seg', {})
+        self.label_topic = ycfg.get('output_label', '/sorting/class_label_image')
+        self._label_img = None
+        if self.split_by_label:
+            self.create_subscription(Image, self.label_topic, self._on_label, qos)
+        # 相机内参：由配置的 FOV/分辨率推出（与仿真相机一致），供 3D 点 -> 像素投影。
+        # 与 _to_world/_world_to_optical 用同一套外参，正反变换误差相互抵消，
+        # 因此投影与 RGB/标签图严格对齐。
+        cam = cfg['camera']
+        w_cam, h_cam = int(cam['width']), int(cam['height'])
+        self.fx = (w_cam / 2.0) / np.tan(float(cam['horizontal_fov']) / 2.0)
+        self.fy = self.fx
+        self.cx = (w_cam - 1) / 2.0
+        self.cy = (h_cam - 1) / 2.0
         self.pub_cloud = self.create_publisher(PointCloud2, self.output_cloud_topic, 3)
         self.pub_markers = self.create_publisher(MarkerArray, self.output_markers_topic, 3)
 
@@ -186,6 +209,53 @@ class PointCloudPreprocessor(Node):
 
         self.pub_markers.publish(arr)
 
+    def _on_label(self, msg: Image):
+        """缓存 YOLO 输出的逐像素类别标签图（mono8：0=背景，class_id+1）。"""
+        if msg.encoding not in ('mono8', '8UC1'):
+            return
+        arr = np.frombuffer(msg.data, dtype=np.uint8)
+        if arr.size != msg.height * msg.width:
+            return
+        self._label_img = arr.reshape(msg.height, msg.width)
+
+    def _split_cluster_by_label(self, pts: np.ndarray):
+        """用类别标签图把一个簇拆成多个子簇（返回点数组列表）。
+
+        本项目约束"每类各一个"，故**类别即实例**：按投影像素的类别分组，每组即一个物体。
+        未被任何掩码覆盖的点（标签 0）及其它过小的类别碎片合并为兜底组，避免 YOLO 漏检
+        时把物体整块丢掉；若拆分结果为空则退回原始整簇。
+        """
+        label_img = self._label_img
+        if not self.split_by_label or label_img is None or len(pts) == 0:
+            return [pts]
+
+        optical = self._world_to_optical(pts)
+        z = optical[:, 2]
+        valid = z > 1e-3
+        u = np.zeros(len(pts), dtype=int)
+        v = np.zeros(len(pts), dtype=int)
+        u[valid] = np.round(self.fx * optical[valid, 0] / z[valid] + self.cx).astype(int)
+        v[valid] = np.round(self.fy * optical[valid, 1] / z[valid] + self.cy).astype(int)
+        h, w = label_img.shape[:2]
+        inside = valid & (u >= 0) & (u < w) & (v >= 0) & (v < h)
+
+        lab = np.zeros(len(pts), dtype=np.int32)
+        lab[inside] = label_img[v[inside], u[inside]]
+
+        groups = []
+        residual = np.zeros(len(pts), dtype=bool)
+        for value in np.unique(lab):
+            sel = (lab == value)
+            if value != 0 and int(sel.sum()) >= self.split_min_points:
+                groups.append(pts[sel])
+            else:
+                residual |= sel
+        # 兜底组只在"完全没有类别命中"（YOLO 漏检）时才启用；否则残余点多为掩码
+        # 边缘未被覆盖的碎片，会形成一个横跨整团的多余质心、进而把抓取中心拉偏。
+        if not groups and int(residual.sum()) >= self.min_cluster_points:
+            groups.append(pts[residual])
+        return groups if groups else [pts]
+
     # ------------------------------------------------------------------
     def on_cloud(self, msg: PointCloud2):
         import time
@@ -244,11 +314,13 @@ class PointCloudPreprocessor(Node):
             sub = work[labels == lab]
             if not (self.min_cluster_points <= len(sub) <= self.max_cluster_points):
                 continue
-            lo, hi = sub.min(axis=0), sub.max(axis=0)
-            extent = hi - lo
-            if np.max(extent) > self.max_cluster_extent:
-                continue
-            clusters.append(((lo + hi) / 2.0, extent, len(sub), sub))
+            # 用 YOLO 类别标签把"紧邻多物体"合并簇拆成多个子簇（每类即一个物体）
+            for sub_pts in self._split_cluster_by_label(sub):
+                lo, hi = sub_pts.min(axis=0), sub_pts.max(axis=0)
+                extent = hi - lo
+                if np.max(extent) > self.max_cluster_extent:
+                    continue
+                clusters.append(((lo + hi) / 2.0, extent, len(sub_pts), sub_pts))
 
         header = Header()
         header.stamp = msg.header.stamp
