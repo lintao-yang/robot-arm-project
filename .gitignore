@@ -30,6 +30,11 @@ weights/
 *.pt
 *.onnx
 
+# 个人 / 内部文档（本地保留，不入库）
+docs/AI_MEMORY_BACKUP.md
+docs/RESUME_AND_THESIS.md
+重要指令
+
 # 编辑器/系统
 .vscode/
 .idea/
