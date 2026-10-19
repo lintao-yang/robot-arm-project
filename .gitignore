@@ -13,7 +13,7 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 
-# 项目 Python 虚拟环境（torch/sklearn 等，体积大，按 docs/UBUNTU_NATIVE_MIGRATION.md 重建）
+# 项目 Python 虚拟环境（torch/sklearn 等，体积大，按 requirements.txt 重建）
 .venv/
 
 # 第三方依赖（graspnet-baseline 源码与权重，体积大，由 scripts 脚本按需拉取）
