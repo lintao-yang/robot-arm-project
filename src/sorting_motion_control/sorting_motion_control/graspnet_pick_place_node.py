@@ -34,6 +34,7 @@ Panda 末端映射（沿用本项目旧垂直抓取链路已验证的结论）�
 """
 
 import copy
+import json
 import math
 import time
 
@@ -299,6 +300,15 @@ class GraspNetPickPlaceNode(Node):
         # 连续模式下，单轮拿不到抓取候选时不立即收工：冷启动/瞬时遮挡都可能出现空帧，
         # 连续空轮达到该次数才判定"确实无可抓目标"。0/1 表示首轮为空即结束。
         self.max_empty_rounds = int(gcfg.get('max_empty_rounds', 3))
+        # ---- 可抓包络（严格）----
+        # 只有物体中心落在该矩形内才视为"可抓"：包络外的物体一律从规划场景移除、不参与抓取。
+        # 该包络必须严格小于机械臂真实可达范围（留安全余量），确保包络内物体都能正常夹取，
+        # 从而杜绝"机械臂卡住待机、场上仍有可抓物体"。可用 scripts/probe_grasp_envelope.py 实测收紧。
+        env = scene_cfg.get('grasp_envelope') or {}
+        self.grasp_envelope = (
+            float(env.get('x_min', 0.18)), float(env.get('x_max', 0.58)),
+            float(env.get('y_min', -0.34)), float(env.get('y_max', 0.34)),
+        )
         # 本轮黑名单（物体组中心）：防"抓取鬼打墙"——同一物体反复失败后直接放弃
         self._blacklist = []
         drop = gcfg.get('drop_pose', [0.66, 0.0, 0.22])
@@ -376,7 +386,16 @@ class GraspNetPickPlaceNode(Node):
         self.stats = {
             'attempted': 0, 'picked_success': 0, 'grasp_failures': 0,
             'retries': 0, 'plan_failures': 0,
+            # 分项计数（供评估层量化空抓率/放置成功率）
+            'empty_grasps': 0,      # 下压到位但闭合到底未夹住（空抓）
+            'grasp_confirmed': 0,   # 闭合确认夹住（放置阶段的尝试次数）
+            'lift_slip': 0,         # 已夹住但抬升失败（搬运/放置途中掉落）
+            'drop_plan_fail': 0,    # 已夹住但投放点上方规划失败
         }
+        # 规划请求计数基线：EVAL 只统计本轮抓取任务期间发出的规划请求
+        self._plan_baseline = {'plan_requests': 0, 'plan_successes': 0}
+        # 本轮内是否疑似把目标物体碰移（夹空/掉落）——置位后放弃本轮剩余候选、重新感知
+        self._object_disturbed = False
         self._cycle_times = []
         self._running = False
         self._state = 'IDLE'
@@ -504,15 +523,29 @@ class GraspNetPickPlaceNode(Node):
         if all(name in position for name in self.joint_names):
             self._arm_positions = [float(position[name]) for name in self.joint_names]
 
-    def _apply_scene(self, scene, timeout: float = 5.0) -> bool:
-        """把 PlanningScene 差异发给 /apply_planning_scene，返回是否成功。"""
+    def _apply_scene(self, scene, timeout: float = 5.0, attempts: int = 3) -> bool:
+        """把 PlanningScene 差异发给 /apply_planning_scene；带服务等待与重试。
+
+        为何要重试：本项目实测过 DDS/服务偶发不响应（单次调用超时）。一旦发生在
+        "附着/撤销附着"上，就会造成节点与 MoveIt 状态不一致——夹爪上留一个幽灵物体，
+        之后所有运动被判碰撞/轨迹无效（-2），机械臂卡死、挡住相机、点云变空。
+        """
         if self.scene_client is None:
             return False
-        future = self.scene_client.call_async(ApplyPlanningScene.Request(scene=scene))
-        deadline = time.time() + timeout
-        while not future.done() and time.time() < deadline:
-            time.sleep(0.01)
-        return bool(future.done() and future.result() is not None)
+        for attempt in range(max(1, attempts)):
+            if not self.scene_client.wait_for_service(timeout_sec=2.0):
+                time.sleep(0.2)
+                continue
+            future = self.scene_client.call_async(ApplyPlanningScene.Request(scene=scene))
+            deadline = time.time() + timeout
+            while not future.done() and time.time() < deadline:
+                time.sleep(0.01)
+            if future.done() and future.result() is not None:
+                return True
+            self.get_logger().warn(
+                f'[scene] /apply_planning_scene 第 {attempt + 1}/{attempts} 次未响应，重试')
+            time.sleep(0.2)
+        return False
 
     def _nearest_gt_object(self, center) -> str:
         """离抓取中心最近的真值物体名（即当前被夹住的那一个）。"""
@@ -606,6 +639,33 @@ class GraspNetPickPlaceNode(Node):
         self.get_logger().info(f'已把 {obj_id} 附着到 {link_name}（抬升/搬运将不再判为碰撞）')
         return True
 
+    def _clear_all_attached(self):
+        """强制清空规划场景里所有"附着在夹爪上的物体"，修复 attach/detach 不一致的幽灵。
+
+        若"撤销附着"因服务/DDS 偶发失败而未生效，MoveIt 会一直把物体挂在夹爪上；物体
+        早已落进分拣框，但规划器认为夹爪上还带着它，导致后续所有运动被判碰撞/轨迹无效
+        （-2），机械臂卡死、挡住相机、点云变空。这里无条件全部摘掉，世界系副本由下一轮
+        _sync_object_collision_objects 按真值放回。
+        """
+        if not self._attached_ids:
+            return
+        scene = PlanningScene()
+        scene.is_diff = True
+        scene.robot_state.is_diff = True
+        for obj_id in sorted(self._attached_ids):
+            attached = AttachedCollisionObject()
+            attached.link_name = 'panda_hand'
+            attached.object.header.frame_id = 'panda_hand'
+            attached.object.id = obj_id
+            attached.object.operation = CollisionObject.REMOVE
+            scene.robot_state.attached_collision_objects.append(attached)
+        ok = self._apply_scene(scene)
+        self.get_logger().warn(
+            f'[修复] 强制清除幽灵附着物体 {sorted(self._attached_ids)}'
+            f'（{"成功" if ok else "失败，下次再试"}）')
+        if ok:
+            self._attached_ids.clear()
+
     def _detach_object(self, object_name: str, link_name: str = 'panda_hand') -> bool:
         """释放后把物体从夹爪上摘掉。
 
@@ -625,7 +685,21 @@ class GraspNetPickPlaceNode(Node):
         scene.is_diff = True
         scene.robot_state.is_diff = True
         scene.robot_state.attached_collision_objects.append(attached)
-        self._apply_scene(scene)
+        # 关键：撤销附着的同时，把**世界系同名副本**也移除。MoveIt 在"撤销附着"时会把物体
+        # 按当时的夹爪位姿放回世界系——那正好是投放点上方的半空，于是 RViz 里出现"投放后
+        # 物体悬空"的假象（其实 Gazebo 里它已落进分拣框）。这里顺手把那份副本清掉，
+        # 与 _attach_object 里的 world_remove 对称。
+        world_remove = CollisionObject()
+        world_remove.header.frame_id = 'world'
+        world_remove.id = obj_id
+        world_remove.operation = CollisionObject.REMOVE
+        scene.world.collision_objects.append(world_remove)
+        if not self._apply_scene(scene):
+            # 撤销失败时**不能**清 _attached_ids：否则节点以为已摘、MoveIt 仍把它挂在夹爪上，
+            # 下一轮 _sync_object_collision_objects 又会放一个世界系副本，形成"手上一个+
+            # 世界里一个"的幽灵碰撞体，使后续规划判轨迹无效（MoveIt -2）。
+            self.get_logger().warn(f'[detach] 撤销附着失败（{obj_id}），保留附着标记以避免幽灵碰撞体')
+            return False
         self._attached_ids.discard(obj_id)
         return True
 
@@ -658,6 +732,10 @@ class GraspNetPickPlaceNode(Node):
         for name, (pose, size, grasped) in self._gt_objects.items():
             if grasped:
                 continue
+            # 可抓包络之外的物体视为"离场"：不进 wanted -> 会被下面的 REMOVE 从规划场景清掉，
+            # 避免它卡住机械臂；感知层本就不在其 ROI 内，行为一致。
+            if not self._in_grasp_envelope(pose.position.x, pose.position.y):
+                continue
             obj_id = f'pick_{name}'
             if obj_id in self._attached_ids:
                 # 已挂到夹爪上：世界系不应再有同名副本
@@ -682,13 +760,21 @@ class GraspNetPickPlaceNode(Node):
             scene.world.collision_objects.append(obstacle)
             self._scene_object_poses[obj_id] = pose
 
-        for obj_id in sorted(self._scene_object_ids - wanted):
+        # REMOVE 集合不能只看 _scene_object_ids：物体被"附着"时我们从该集合里移除过它，
+        # 而事后它可能又以"世界系副本"的形式出现在规划场景里（位姿停在半空）——这种
+        # "账本上没有、场景里却有"的悬空盒会永远清不掉，卡死后续所有规划（-2）。
+        # 因此按**真值物体全集**来算 REMOVE 集合；当前已附着在夹爪上的除外。
+        known_ids = ({f'pick_{name}' for name in self._gt_objects}
+                     | set(self._scene_object_ids)) - set(self._attached_ids)
+        for obj_id in sorted(known_ids - wanted):
             obstacle = CollisionObject()
             obstacle.header.frame_id = 'world'
             obstacle.id = obj_id
             obstacle.operation = CollisionObject.REMOVE
             scene.world.collision_objects.append(obstacle)
             self._scene_object_poses.pop(obj_id, None)
+            if obj_id not in self._scene_object_ids:
+                self.get_logger().warn(f'[同步] 清除场景中多余的悬空碰撞盒 {obj_id}')
 
         if not scene.world.collision_objects:
             return
@@ -768,6 +854,63 @@ class GraspNetPickPlaceNode(Node):
         else:
             self.get_logger().info('[ACM] 已恢复基线：夹爪对所有物体禁止碰撞')
         return True
+
+    def _recover_from_invalid_start(self, force: bool = False) -> bool:
+        """起点非法（当前关节状态即碰撞）时的强制复位，打断"规划级联失败"。
+
+        现象（本项目实测）：某次抓取失败后，机械臂停在贴着物体/桌面的位姿；此后每轮
+        "移到观察位"以及每个候选的预抓取规划都从**碰撞起点**出发，RRTConnect 直接判
+        99999，机械臂原地不动，于是下一位姿也从同一非法起点规划 —— 形成级联锁死，
+        整轮/整场几乎全部规划失败（探针日志表现为大量"规划起点非法：panda_hand<->..."）。
+
+        对策：检测到起点非法时，**临时把整张 ACM 置为允许碰撞**（读全量后写回，避免破坏
+        矩阵结构），据此把机械臂强制规划回观察位（失败再退回 home），随后无论如何都恢复
+        基线 ACM。物体/桌面的碰撞体保持不动，复位后由 _sync_object_collision_objects 继续同步。
+
+        返回 True 表示"确实作了复位"；False 表示起点本就合法（或服务不可用）无需处理。
+        """
+        # 先无条件清掉"幽灵附着"（见 _clear_all_attached）：若撤销附着失败过，MoveIt 会把
+        # 物体一直挂在夹爪上，导致起点/轨迹被判碰撞，机械臂卡死——这是本次卡住的根因。
+        self._clear_all_attached()
+        validity = self.moveit.check_state_validity(self.joint_names)
+        if not force and (validity is None or validity.get('valid')):
+            return False  # 起点本就合法 -> 无需复位（force=True 时强制走一次逃逸）
+
+        contacts = '; '.join(validity.get('contacts', [])) or '（无接触明细）'
+        self.get_logger().warn(f'[恢复] 规划起点非法（起点即碰撞），执行强制复位：{contacts}')
+
+        current = self.moveit.get_allowed_collision_matrix()
+        if current is None:
+            self.get_logger().warn('[恢复] 无法读取碰撞矩阵，跳过强制复位')
+            return False
+        names, _values = current
+
+        matrix = AllowedCollisionMatrix()
+        matrix.entry_names = list(names)
+        for _ in names:
+            entry = AllowedCollisionEntry()
+            entry.enabled = [True] * len(names)
+            matrix.entry_values.append(entry)
+
+        scene = PlanningScene()
+        scene.is_diff = True
+        scene.allowed_collision_matrix = matrix
+        if not self._apply_scene(scene):
+            self.get_logger().warn('[恢复] 临时放开碰撞矩阵失败，跳过强制复位')
+            return False
+
+        try:
+            target = self.observe_joint_values or self.home_joint_values
+            ok, message = self.moveit.move_to_joint_values(
+                target, self.velocity, self.acceleration, timeout=30.0)
+            if not ok and self.home_joint_values and list(self.home_joint_values) != list(target):
+                ok, message = self.moveit.move_to_joint_values(
+                    self.home_joint_values, self.velocity, self.acceleration, timeout=30.0)
+            self.get_logger().warn(f'[恢复] 强制复位结果: {ok}（{message}）')
+            return bool(ok)
+        finally:
+            # 恢复基线 ACM（夹爪/手臂对所有物体禁止碰撞），确保后续正常规划
+            self._acm_set_target(None)
 
     def _on_clusters(self, msg: MarkerArray):
         """缓存聚类质心与尺寸（CUBE marker：位姿=质心，scale=包围盒尺寸）。"""
@@ -957,6 +1100,31 @@ class GraspNetPickPlaceNode(Node):
         message.state = self._state
         self.pub_statistics.publish(message)
 
+    def _emit_eval(self):
+        """输出一行可解析的评估指标（批量实验脚本据此逐轮抓取数据）。
+
+        覆盖三层指标所需的原始计数：规划请求/成功（规划成功率）、空抓与抓取确认
+        （空抓率）、抓取确认与成功搬运（放置成功率）、尝试与成功（端到端成功率）。
+        """
+        plan_now = self.moveit.plan_stats()
+        base = self._plan_baseline
+        close_attempts = self.stats['empty_grasps'] + self.stats['grasp_confirmed']
+        payload = {
+            'attempted': self.stats['attempted'],
+            'picked_success': self.stats['picked_success'],
+            'grasp_failures': self.stats['grasp_failures'],
+            'plan_failures': self.stats['plan_failures'],
+            'empty_grasps': self.stats['empty_grasps'],
+            'grasp_confirmed': self.stats['grasp_confirmed'],
+            'close_attempts': close_attempts,
+            'lift_slip': self.stats['lift_slip'],
+            'drop_plan_fail': self.stats['drop_plan_fail'],
+            'plan_requests': plan_now['plan_requests'] - base['plan_requests'],
+            'plan_successes': plan_now['plan_successes'] - base['plan_successes'],
+            'avg_cycle_time': round(float(np.mean(self._cycle_times)), 3) if self._cycle_times else 0.0,
+        }
+        self.get_logger().info('[EVAL] ' + json.dumps(payload))
+
     # ==================================================================
     # 抓取姿态映射
     # ==================================================================
@@ -1054,6 +1222,8 @@ class GraspNetPickPlaceNode(Node):
         continuous = bool(request.continuous)
         for key in self.stats:
             self.stats[key] = 0
+        # 规划请求计数基线：EVAL 只统计本轮抓取任务期间发出的规划请求
+        self._plan_baseline = self.moveit.plan_stats()
         self._cycle_times.clear()
         self._running = True
         import threading
@@ -1066,6 +1236,72 @@ class GraspNetPickPlaceNode(Node):
     # ==================================================================
     # 主循环
     # ==================================================================
+    def _return_home(self):
+        """任务结束时把机械臂送回初始位（home），避免停在半空/工作区。
+
+        此前没有这一步：任务 DONE 后就停在原地（若"移到观察位"还失败过，看着就像卡死）。
+        """
+        self._acm_set_target(None)
+        self._clear_all_attached()   # 先清幽灵附着，否则夹爪上的幽灵会让回位规划也 -2
+        targets = []
+        if self.home_joint_values:
+            targets.append(('初始位', self.home_joint_values))
+        if (self.observe_joint_values
+                and list(self.observe_joint_values) != list(self.home_joint_values)):
+            targets.append(('观察位', self.observe_joint_values))
+        for name, values in targets:
+            ok, message = self.moveit.move_to_joint_values(
+                values, self.velocity, self.acceleration, timeout=30.0)
+            if ok:
+                self.get_logger().info(f'任务结束：已回到{name}')
+                return True
+            self.get_logger().warn(f'任务结束回到{name}失败（{message}）')
+        self._recover_from_invalid_start(force=True)
+        return False
+
+    def _log_no_attemptable(self, grasps_msg):
+        """诊断：attempted==0 时逐组说明为何不可尝试（黑名单 / 包络外 / 已抓取）。"""
+        groups = self._group_grasps(grasps_msg.grasps)
+        n_black = n_env = 0
+        for index, group in enumerate(groups):
+            c = group['center']
+            if self._is_blacklisted(c):
+                n_black += 1
+                self.get_logger().info(
+                    f'[诊断] 物体{chr(ord("A") + index)} 中心({c[0]:.3f},{c[1]:.3f}) 在【黑名单】中，跳过')
+            elif not self._in_grasp_envelope(c[0], c[1]):
+                n_env += 1
+                self.get_logger().info(
+                    f'[诊断] 物体{chr(ord("A") + index)} 中心({c[0]:.3f},{c[1]:.3f}) 在【可抓包络外】，跳过')
+        remaining = [n for n, (p, _s, g) in self._gt_objects.items()
+                     if not g and self._in_grasp_envelope(p.position.x, p.position.y)]
+        self.get_logger().warn(
+            f'[诊断] 无可尝试物体：候选组 {len(groups)}（黑名单 {n_black} / 包络外 {n_env}）；'
+            f'包络内未抓取真值物体 {len(remaining)} 个')
+
+    def _log_scene_mismatch(self):
+        """诊断：把 move_group **实际的**规划场景内容打印出来，与本节点账本对比。
+
+        为什么需要：本项目出现过"物体早已掉落、场景里却仍有悬空碰撞盒"的恶性问题，
+        它会把后续规划打成 -2。仅靠节点自己的账本无法发现（那些盒子不在账本里），
+        所以直接问 move_group：世界系有哪些物体、分别在哪、夹爪上附着着什么。
+        """
+        result = self.moveit.get_scene_objects(timeout=5.0)
+        if result is None:
+            self.get_logger().warn('[诊断] /get_planning_scene 不可用，无法核对规划场景')
+            return
+        world, attached = result
+        self.get_logger().warn(
+            f'[诊断] move_group 实际场景：附着物体={attached}；世界物体={[w[0] for w in world]}')
+        for obj_id, x, y, z in world:
+            # 只有 pick_* 归本节点管；bin_zone_*/work_table 是静态环境体，不算异常
+            if not obj_id.startswith('pick_'):
+                self.get_logger().info(f'[诊断] 环境物体 {obj_id}')
+                continue
+            mark = '  <<< 账本外（悬空盒嫌疑）' if obj_id not in self._scene_object_ids else ''
+            self.get_logger().warn(
+                f'[诊断] 待抓物体碰撞盒 {obj_id} @ ({x:.3f},{y:.3f},{z:.3f}){mark}')
+
     def _park_for_detection(self):
         """DETECT 前把机械臂移出工作区（观察位），避免相机把机械臂本体拍进去。
 
@@ -1089,10 +1325,17 @@ class GraspNetPickPlaceNode(Node):
         try:
             while self._running and rclpy.ok():
                 self._set_state('DETECT')
-                # 先把机械臂挪出工作区（否则它会被拍进点云、GraspNet 在手臂上提议抓取），
-                # 再把待抓物体同步进规划场景，使本轮的下压规划能看到真实障碍物
-                self._park_for_detection()
+                # 每轮开始清掉"物体被碰移"标记（重新感知后重新判定）
+                self._object_disturbed = False
+                # 先把规划场景与真值对齐：这会清掉上一轮遗留的"悬空/幽灵"碰撞盒。
+                # 必须放在复位/停车**之前**——否则陈旧的碰撞盒会让"复位/移到观察位"
+                # 的规划直接判 -2，而能清掉它的同步却排在最后，等于永远解不开。
                 self._sync_object_collision_objects()
+                # 若上一轮遗留了非法起点（机械臂停靠在物体/桌面上），先强制复位再停车；
+                # 否则"移到观察位"的规划会从碰撞起点出发直接 99999，触发整轮级联失败。
+                self._recover_from_invalid_start()
+                # 再把机械臂挪出工作区（否则它会被拍进点云、GraspNet 在手臂上提议抓取）
+                self._park_for_detection()
                 grasps = self._wait_fresh_grasps(timeout=8.0)
                 if grasps is None or not grasps.grasps:
                     empty_rounds += 1
@@ -1106,12 +1349,15 @@ class GraspNetPickPlaceNode(Node):
                     continue
 
                 success, attempted = self._attempt_grasps(grasps)
+                self._emit_eval()
                 empty_rounds = 0 if success else empty_rounds + 1
                 if not continuous:
                     break
                 if success:
                     continue
                 if attempted == 0:
+                    # 逐组说明"为什么没有可尝试物体"（黑名单 / 包络外），避免含糊结论
+                    self._log_no_attemptable(grasps)
                     # 无可用物体（全部在黑名单 / 已被抓走）：等下一帧，连续超限即收工
                     if empty_rounds >= self.max_empty_rounds:
                         self.get_logger().info('已无可尝试物体（全部黑名单或已抓取），任务结束')
@@ -1119,6 +1365,10 @@ class GraspNetPickPlaceNode(Node):
                     time.sleep(2.0)
                 else:
                     self.get_logger().info('本轮抓取失败，进入下一轮')
+            # 任务结束：把机械臂送回初始位（此前缺失，导致任务结束后停在半空/工作区）
+            self._return_home()
+            self._log_scene_mismatch()
+            self._emit_eval()
             self._set_state('DONE')
         except Exception as exc:
             self.get_logger().error(f'抓取循环异常: {exc}')
@@ -1144,16 +1394,16 @@ class GraspNetPickPlaceNode(Node):
         groups.sort(key=lambda group: -float(group['grasps'][0].score))
         return groups
 
-    def _group_height(self, center) -> float:
-        """物体组的高度（米）：取最近簇的 z 方向尺寸；无簇数据时返回 0。"""
-        info = self._nearest_cluster(np.asarray(center, dtype=float))
-        return float(info[1][2]) if info is not None else 0.0
-
     def _is_blacklisted(self, center) -> bool:
         for blocked in self._blacklist:
             if float(np.linalg.norm(center - blocked)) <= self.object_cluster_radius:
                 return True
         return False
+
+    def _in_grasp_envelope(self, x: float, y: float) -> bool:
+        """物体/抓取中心是否落在"可抓包络"内（world 系）。包络外 = 离场，不参与抓取。"""
+        x_min, x_max, y_min, y_max = self.grasp_envelope
+        return (x_min <= x <= x_max) and (y_min <= y <= y_max)
 
     def _screen_candidates(self, grasps):
         """对每组前 N 个候选做"无碰撞逆解"预检，可行候选优先返回。
@@ -1187,12 +1437,17 @@ class GraspNetPickPlaceNode(Node):
         返回 (是否成功, 本轮实际尝试的候选数)。attempted=0 表示当前无可用物体（全在黑名单）。
         """
         groups = self._group_grasps(grasps_msg.grasps)
-        # 抓取顺序：从最高物体到最矮物体
-        groups.sort(key=lambda group: -self._group_height(group['center']))
+        # 抓取顺序不再强制"从高到低"：沿用 _group_grasps 的排序（按 GraspNet 候选评分降序），
+        # 由系统按抓取质量自行决定先抓谁后抓谁。
         attempted = 0
         for index, group in enumerate(groups):
             label = f'物体{chr(ord("A") + index)}'
             if self._is_blacklisted(group['center']):
+                continue
+            if not self._in_grasp_envelope(group['center'][0], group['center'][1]):
+                self.get_logger().info(
+                    f'跳过{label}：中心 ({group["center"][0]:.3f},{group["center"][1]:.3f}) '
+                    '在可抓包络之外，不尝试抓取')
                 continue
             ordered = self._screen_candidates(group['grasps'])
             candidates = ordered[:self.max_attempts_per_object]
@@ -1211,6 +1466,13 @@ class GraspNetPickPlaceNode(Node):
                     self._blacklist = []
                     return True, attempted
                 self.get_logger().warn(f'{label} 候选{i} 失败，原因：{message}')
+                if self._object_disturbed:
+                    # 空抓/掉落说明很可能把物体碰移了；继续用同一张旧快照的剩余候选，
+                    # 只会对着旧位置反复下压。立即结束本轮、重新感知后再试。
+                    self.get_logger().warn(
+                        f'{label} 疑似把物体碰移（{message}）；放弃本轮剩余候选，'
+                        '重新感知后重试，避免继续对着旧位置下压')
+                    return False, attempted
             self._blacklist.append(group['center'].copy())
             self.get_logger().info(
                 f'{label} 尝试次数超限（{len(candidates)}/{len(group["grasps"])}），加入黑名单')
@@ -1238,6 +1500,8 @@ class GraspNetPickPlaceNode(Node):
         # 只豁免"夹爪连杆 <-> 该物体"，其余物体/桌面/手臂一律保持严格。
         object_name = self._nearest_gt_object(
             (grasp.pose.position.x, grasp.pose.position.y, grasp.pose.position.z))
+        # 起点若非法（上一候选遗留的碰撞位姿）先强制复位，否则本候选必然 99999。
+        self._recover_from_invalid_start()
         self._acm_set_target(f'pick_{object_name}' if object_name else None)
 
         pregrasp_pose = copy.deepcopy(grasp_pose)
@@ -1282,12 +1546,18 @@ class GraspNetPickPlaceNode(Node):
         finger_position = self.gripper.close_and_measure()
         finger_effort = self.gripper.finger_effort()
         grasped = self.gripper.is_grasped(finger_position)
+        # 分项计数：闭合确认夹住 = 抓取确认成功；闭合到底未夹住 = 空抓
+        if grasped:
+            self.stats['grasp_confirmed'] += 1
+        else:
+            self.stats['empty_grasps'] += 1
         self.get_logger().info(
             f'抓取验证：手指位置={_fmt(finger_position)} 力矩={_fmt(finger_effort)} '
             f'阈值={self.gripper.grasp_threshold} => {"夹住" if grasped else "空抓"}')
         if not grasped:
             # 空抓：原地判失败并退回预抓取点，绝不带着空夹爪移动到投放区
             self.stats['grasp_failures'] += 1
+            self._object_disturbed = True
             self.gripper.open()
             self.moveit.move_to_pose(pregrasp_pose, self.velocity, self.acceleration)
             return False, '夹爪闭合到底（空抓），原地判失败'
@@ -1310,6 +1580,8 @@ class GraspNetPickPlaceNode(Node):
             if attached:
                 self._detach_object(object_name)
             self.stats['grasp_failures'] += 1
+            self.stats['lift_slip'] += 1
+            self._object_disturbed = True
             return False, f'抬升失败: {reason}'
 
         # 5) 搬运到投放点 -> 释放（按物体所属颜色分拣区投放）
@@ -1321,6 +1593,7 @@ class GraspNetPickPlaceNode(Node):
             self.gripper.open()
             if attached:
                 self._detach_object(object_name)
+            self.stats['drop_plan_fail'] += 1
             return False, f'投放点上方规划失败: {reason}'
         ok, reason = self.moveit.move_cartesian(
             [drop_pose], velocity=self.cartesian_velocity, max_step=0.004, timeout=30.0

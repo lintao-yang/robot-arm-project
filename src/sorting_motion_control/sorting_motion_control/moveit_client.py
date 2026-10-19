@@ -108,6 +108,22 @@ class MoveGroupClient:
         self._scene_get_client = node.create_client(GetPlanningScene, '/get_planning_scene')
         self._server_ready = False
 
+        # ---- 规划请求统计（供评估层计算"规划成功率"，只计数不改行为）----
+        # 每次 move_to_pose / move_to_joint_values / move_cartesian 记为一次规划请求；
+        # 返回成功即计入成功数。仅统计"规划+执行"类请求，诊断类探针不计入。
+        self.plan_requests = 0
+        self.plan_successes = 0
+
+    def _record_plan(self, ok: bool):
+        """记录一次规划请求及其结果（仅统计）。"""
+        self.plan_requests += 1
+        if ok:
+            self.plan_successes += 1
+
+    def plan_stats(self) -> dict:
+        """返回累计的规划请求/成功计数。"""
+        return {'plan_requests': self.plan_requests, 'plan_successes': self.plan_successes}
+
     # ------------------------------------------------------------------
     def wait_for_server(self, timeout: float = 30.0) -> bool:
         if self._server_ready:
@@ -243,7 +259,9 @@ class MoveGroupClient:
                 orientation_tolerance if orientation_tolerance is not None else self.orientation_tolerance,
             )
         )
-        return self._execute(request, timeout)
+        ok, reason = self._execute(request, timeout)
+        self._record_plan(ok)
+        return ok, reason
 
     def move_to_joint_values(self, values, velocity: float = 0.25,
                              acceleration: float = 0.25, timeout: float = 25.0):
@@ -256,7 +274,9 @@ class MoveGroupClient:
         if self.planner_id:
             request.planner_id = self.planner_id
         request.goal_constraints.append(self._joint_constraints(values))
-        return self._execute(request, timeout)
+        ok, reason = self._execute(request, timeout)
+        self._record_plan(ok)
+        return ok, reason
 
     # ------------------------------------------------------------------
     # 直线插补（Cartesian）运动
@@ -513,6 +533,7 @@ class MoveGroupClient:
         if response is None:
             return False, '笛卡尔路径计算无响应'
         if response.fraction < min_fraction:
+            self._record_plan(False)
             return False, f'直线路径仅规划出 {response.fraction * 100:.0f}%'
 
         trajectory = self._retime(response.solution, 1.0 / max(velocity, 1e-3))
@@ -535,12 +556,45 @@ class MoveGroupClient:
             return False, '未收到轨迹执行结果'
         code = wrapped.result.error_code.val
         if code == MOVEIT_SUCCESS:
+            self._record_plan(True)
             return True, f'ok (fraction={response.fraction:.2f})'
+        self._record_plan(False)
         return False, f'轨迹执行 MoveIt 错误码 {code}'
 
     # ------------------------------------------------------------------
     # Allowed Collision Matrix（ACM）
     # ------------------------------------------------------------------
+    def get_scene_objects(self, timeout: float = 5.0):
+        """直接向 move_group 查询"世界系碰撞体 id/位姿"与"附着在机器人上的物体 id"。
+
+        用途：诊断**规划场景里残留的悬空碰撞盒**。这类盒子在节点自己的账本
+        （_scene_object_ids/_attached_ids）里查不到，却会卡死后续规划，必须直接问
+        move_group。返回 ``(world, attached)``：world 为 [(id, x, y, z), ...]，
+        attached 为 [id, ...]；服务不可用返回 None。
+        """
+        if not self._scene_get_client.wait_for_service(timeout_sec=timeout):
+            return None
+        request = GetPlanningScene.Request()
+        request.components.components = (
+            PlanningSceneComponents.WORLD_OBJECT_NAMES
+            | PlanningSceneComponents.WORLD_OBJECT_GEOMETRY
+            | PlanningSceneComponents.ROBOT_STATE_ATTACHED_OBJECTS)
+        future = self._scene_get_client.call_async(request)
+        if not self._wait(future, timeout):
+            return None
+        response = future.result()
+        if response is None:
+            return None
+        world = []
+        for obj in response.scene.world.collision_objects:
+            pose = obj.primitive_poses[0] if obj.primitive_poses else None
+            if pose is None:
+                world.append((obj.id, float('nan'), float('nan'), float('nan')))
+            else:
+                world.append((obj.id, pose.position.x, pose.position.y, pose.position.z))
+        attached = [a.object.id for a in response.scene.robot_state.attached_collision_objects]
+        return world, attached
+
     def get_allowed_collision_matrix(self, timeout: float = 5.0):
         """读取 move_group 当前的**完整** ACM，返回 ``(entry_names, entry_values)``。
 

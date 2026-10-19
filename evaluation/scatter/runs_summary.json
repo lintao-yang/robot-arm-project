@@ -1,0 +1,151 @@
+{
+  "root": "logs/eval_runs",
+  "runs": [
+    {
+      "run": "run_01",
+      "done": true,
+      "attempted": 30,
+      "picked_success": 0,
+      "grasp_failures": 0,
+      "plan_failures": 30,
+      "empty_grasps": 0,
+      "grasp_confirmed": 0,
+      "close_attempts": 0,
+      "lift_slip": 0,
+      "drop_plan_fail": 0,
+      "plan_requests": 36,
+      "plan_successes": 4,
+      "avg_cycle_time": 0.0,
+      "state": "DONE",
+      "duration_s": 186.778,
+      "e2e_pick_success_rate": 0.0,
+      "planning_success_rate": 0.1111,
+      "empty_grasp_rate": 0.0,
+      "place_success_rate": 0.0
+    },
+    {
+      "run": "run_02",
+      "done": true,
+      "attempted": 31,
+      "picked_success": 1,
+      "grasp_failures": 3,
+      "plan_failures": 27,
+      "empty_grasps": 3,
+      "grasp_confirmed": 1,
+      "close_attempts": 4,
+      "lift_slip": 0,
+      "drop_plan_fail": 0,
+      "plan_requests": 65,
+      "plan_successes": 37,
+      "avg_cycle_time": 56.506,
+      "state": "DONE",
+      "duration_s": 457.904,
+      "e2e_pick_success_rate": 0.0323,
+      "planning_success_rate": 0.5692,
+      "empty_grasp_rate": 0.75,
+      "place_success_rate": 1.0
+    },
+    {
+      "run": "run_03",
+      "done": true,
+      "attempted": 11,
+      "picked_success": 2,
+      "grasp_failures": 1,
+      "plan_failures": 8,
+      "empty_grasps": 1,
+      "grasp_confirmed": 2,
+      "close_attempts": 3,
+      "lift_slip": 0,
+      "drop_plan_fail": 0,
+      "plan_requests": 37,
+      "plan_successes": 32,
+      "avg_cycle_time": 53.703,
+      "state": "",
+      "e2e_pick_success_rate": 0.1818,
+      "planning_success_rate": 0.8649,
+      "empty_grasp_rate": 0.3333,
+      "place_success_rate": 1.0
+    }
+  ],
+  "aggregate": {
+    "attempted": {
+      "mean": 24.0,
+      "std": 9.2014,
+      "n": 3
+    },
+    "picked_success": {
+      "mean": 1.0,
+      "std": 0.8165,
+      "n": 3
+    },
+    "plan_requests": {
+      "mean": 46.0,
+      "std": 13.4412,
+      "n": 3
+    },
+    "plan_successes": {
+      "mean": 24.3333,
+      "std": 14.522,
+      "n": 3
+    },
+    "empty_grasps": {
+      "mean": 1.3333,
+      "std": 1.2472,
+      "n": 3
+    },
+    "grasp_confirmed": {
+      "mean": 1.0,
+      "std": 0.8165,
+      "n": 3
+    },
+    "lift_slip": {
+      "mean": 0.0,
+      "std": 0.0,
+      "n": 3
+    },
+    "drop_plan_fail": {
+      "mean": 0.0,
+      "std": 0.0,
+      "n": 3
+    },
+    "e2e_pick_success_rate": {
+      "mean": 0.0714,
+      "std": 0.0792,
+      "n": 3
+    },
+    "planning_success_rate": {
+      "mean": 0.5151,
+      "std": 0.3101,
+      "n": 3
+    },
+    "empty_grasp_rate": {
+      "mean": 0.3611,
+      "std": 0.3068,
+      "n": 3
+    },
+    "place_success_rate": {
+      "mean": 0.6667,
+      "std": 0.4714,
+      "n": 3
+    },
+    "avg_cycle_time": {
+      "mean": 36.7363,
+      "std": 26.0017,
+      "n": 3
+    },
+    "overall_pooled": {
+      "attempted": 72,
+      "picked_success": 3,
+      "e2e_pick_success_rate": 0.0417,
+      "plan_requests": 138,
+      "plan_successes": 73,
+      "planning_success_rate": 0.529,
+      "close_attempts": 7,
+      "empty_grasps": 4,
+      "empty_grasp_rate": 0.5714,
+      "grasp_confirmed": 3,
+      "place_success_rate": 1.0
+    },
+    "n_runs": 3
+  }
+}

@@ -59,19 +59,37 @@ services:
 
 # ---------- 分拣场景 ----------
 scene:
-  n_objects: 4                 # 默认待分拣物体数量
+  n_objects: 6                 # 默认待分拣物体数量（无序抓取，散布摆放）
+  # 类别数量严格固定：有且仅有一个蓝色圆柱体（blue_cylinder=class 1）。
+  # 仅在 reset_scene 未显式要求 randomize_class 时生效（randomize_class=true 时不套用，
+  # 供数据集采集使用）；若与 n_objects 不一致，以本表为准。
+  composition:
+    0: 2   # red_cube
+    1: 1   # blue_cylinder（严格唯一）
+    2: 1   # green_bar
+    3: 2   # yellow_box
   table:
     top_z: 0.0                 # 桌面上表面高度（米）
     size: [0.70, 0.80, 0.05]
     pose: [0.42, 0.0, -0.025]
-  # 初始物体紧凑摆放：4 个物体按网格紧凑排列（columns 控制列数，4 个 -> 2x2），
-  # 相邻物体边界间距精确等于 gap（建议 0.5~2mm），无穿模/重叠；
-  # 物体平放（roll=pitch=0），底面贴合桌面，姿态稳定、无悬空/倾斜。
+  # 摆放策略：placement=scatter 时在 scatter_region 内**随机散布**
+  # （拒绝采样 + 旋转矩形分离轴检测），物体之间保持 min_gap 的最小边界间距、随机偏航，
+  # 保证不重叠、不穿模；若面积/间隙不足导致采样失败，自动回退到紧凑网格（columns/gap）。
   layout:
-    center_x: 0.40            # 集群中心 x（world 系，米）
-    center_y: 0.0             # 集群中心 y（world 系，米）
-    columns: 2                # 网格列数（4 个物体 -> 2x2）
-    gap: 0.040                # 相邻物体边界间距（米）。需满足 gap > 全开手指伸距 + 手指厚 + scene_object_margin
+    placement: scatter        # scatter（随机散布，默认）| grid（紧凑网格，回退）
+    min_gap: 0.020            # scatter 模式：物体间最小边界间距（米）
+    random_yaw: true          # scatter 模式：是否随机偏航（无序抓取更真实）
+    # 散布区域收窄到可抓包络内侧（留 ≥3cm 余量），使被碰移的物体不会立刻掉出包络。
+    # 已验证可稳定容纳 7 个物体（含 2 个 100mm 绿条）。
+    scatter_region:
+      x_min: 0.30
+      x_max: 0.50
+      y_min: -0.18
+      y_max: 0.18
+    center_x: 0.40            # grid 回退：集群中心 x（world 系，米）
+    center_y: 0.0             # grid 回退：集群中心 y（world 系，米）
+    columns: 2                # grid 回退：网格列数
+    gap: 0.020                # grid 回退：相邻物体边界间距（米）
     rest_clearance: 0.0005    # 落桌时底面与桌面的初始间隙（米），防止初始穿模
   # 机械臂工作区 ROI：只有落在这个范围内的目标才参与抓取
   # （分拣箱位于 ROI 之外，避免箱子本身被当作待抓取目标）
@@ -80,6 +98,18 @@ scene:
     x_max: 0.58
     y_min: -0.34
     y_max: 0.34
+  # 可抓包络（严格）：只有物体中心落在该矩形内才视为"可抓"。包络外的物体一律从
+  # 规划场景移除、不再尝试抓取，从根本上杜绝"机械臂卡住待机、场上仍有可抓物体"。
+  # 硬约束：包络必须**严格小于**机械臂真实可达范围（留安全余量），且
+  # layout.scatter_region ⊂ grasp_envelope。
+  # 已用 scripts/probe_grasp_envelope.py 实测：竖直抓取(link8 z=0.12m)在
+  # x[0.20,0.56] y[-0.26,0.28] 内几乎处处有解(仅 3/364 格点无解)；
+  # 此处取实测边界内缩 ~3cm 作为严格包络。
+  grasp_envelope:
+    x_min: 0.26
+    x_max: 0.53
+    y_min: -0.23
+    y_max: 0.23
   # 分拣区（每个类别对应一个）
   bins:
     - zone_a
@@ -100,15 +130,18 @@ motion:
   # 需与 MoveIt OMPL 配置中的 planner_configs 名称一致
   # （moveit_resources_panda_moveit_config/config/ompl_planning.yaml）
   planner_id: RRTConnectkConfigDefault
-  velocity_scaling: 0.25
-  accel_scaling: 0.25
-  approach_velocity_scaling: 0.10   # 接近目标时降速
-  cartesian_velocity_scaling: 0.10  # 直线插补（下降/抬升/放置）速度比例
+  # ---- 安全提速包（只改速度，不改行为逻辑）----
+  velocity_scaling: 0.40            # OMPL 位姿/关节移动速度比例（原 0.25）
+  accel_scaling: 0.40
+  # 注意：下面两个 "velocity_scaling" 在 moveit_client 里被取倒数当"时间缩放"用，
+  # 值越大越快（0.10 会把直线插补轨迹时间轴拉长 10 倍）。0.10 -> 0.30 即快 3 倍。
+  approach_velocity_scaling: 0.30   # 接近/下压速度比例（原 0.10）
+  cartesian_velocity_scaling: 0.30  # 直线插补（下降/抬升/放置）速度比例（原 0.10）
   goal_position_tolerance: 0.010    # 位姿约束容差（米）：放宽以缓解 99999 不可达
   goal_orientation_tolerance: 0.12  # 姿态约束容差（弧度）：放宽以缓解 99999 不可达
-  # 单次规划时间与尝试次数：过大会显著拉长单次抓取周期
-  planning_time: 3.0
-  planning_attempts: 10             # 多次尝试可显著降低 OMPL 偶发失败（99999）
+  # 单次规划时间与尝试次数：过大会显著拉长单次抓取周期（原 3.0 / 10）
+  planning_time: 1.0
+  planning_attempts: 3
   home_joint_values: [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785]
   observe_joint_values: [0.0, -0.35, 0.0, -2.0, 0.0, 1.65, 0.785]
 
@@ -201,6 +234,9 @@ graspnet:
   # 时序累积（秒）：静态场景下 GraspNet 单帧只对部分物体提出抓取，累积可补齐覆盖。0=关闭
   accumulate_window: 3.0
   dedupe_voxel: 0.02                        # 累积去重的体素边长（米）
+  # 场景移动阈值（米）：任一聚类质心位移超过该值即清空累积候选池，
+  # 避免物体被夹空碰移后仍对着旧位置反复下压。
+  pool_move_tol: 0.015
   infer_period: 1.0                         # 最小推理间隔（秒）
   input_cloud: /sorting/workspace_cloud     # 输入：相机光学系工作区点云
   output_grasps: /sorting/graspnet_grasps   # 输出：world 系 6DoF 抓取数组

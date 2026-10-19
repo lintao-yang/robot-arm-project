@@ -1,0 +1,31 @@
+# 第三方组件与许可声明（THIRD PARTY NOTICES）
+
+本项目（robot-arm-project）整体以 **GNU AGPL-3.0** 发布（见 `LICENSE`）。
+之所以选择 AGPL-3.0，是因为本项目在感知层使用了 **Ultralytics YOLOv8**（AGPL-3.0），
+其许可具有传染性；若你希望以更宽松的许可使用本项目，请先替换掉 YOLOv8 相关代码与权重。
+
+## 直接依赖（运行时）
+
+| 组件 | 用途 | 许可 |
+|---|---|---|
+| ROS 2 Humble | 通信/构建框架 | Apache-2.0 |
+| MoveIt 2 | 运动规划与执行 | BSD-3-Clause |
+| Gazebo Sim (Fortress) / sdformat | 物理仿真 | Apache-2.0 |
+| franka_description (Panda 模型) | 机械臂 URDF/mesh | Apache-2.0 |
+| GraspNet-baseline | 6DoF 抓取检测（预训练权重 + 推理代码） | MIT |
+| **Ultralytics YOLOv8** | 2D 实例分割（拆簇） | **AGPL-3.0** |
+| PyTorch / torchvision | 深度学习运行时 | BSD-3-Clause |
+| NumPy / SciPy / scikit-learn | 数值与聚类 | BSD-3-Clause |
+| OpenCV (opencv-python) | 图像处理 | Apache-2.0 |
+| Matplotlib | 报告图表 | PSF-based (BSD-compatible) |
+| PyYAML | 配置解析 | MIT |
+
+## 说明
+
+1. **GraspNet 预训练权重**：版权归原作者所有，本项目仅作研究与演示用途；
+   权重与源码通过 `scripts/` 下的脚本按需拉取，不随仓库分发。
+2. **YOLOv8 训练权重**：本项目在合成数据集上微调的 `best.pt` 同样受 **AGPL-3.0** 约束，
+   不随仓库分发（通过 GitHub Release 提供），见 README "模型权重" 一节。
+3. 各功能包 `setup.py` 中的 `license=` 字段为 ROS 2 模板遗留（`MIT`），
+   **仓库级许可以根目录 `LICENSE`（AGPL-3.0）为准**。
+4. 若用于商业闭源场景，请自行评估 AGPL-3.0 的合规要求，或替换上述 AGPL 组件。

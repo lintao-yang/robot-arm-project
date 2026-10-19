@@ -8,9 +8,9 @@
 "预抓取 → 下降 → 闭合 → 抬升 → 搬运 → 释放"的抓取闭环，
 抓取确认基于**真实接触物理**（手指关节位置判据），最后输出量化评估指标。
 
-> 说明：本项目曾有一条"2D 检测（YOLO/颜色分割）+ 垂直四段式抓取 + 按类别分拣"的旧链路，
-> 现已**整体移除**。当前链路不含任何 2D 检测/YOLO 依赖，也不做按类别的分区放置，
-> 所有物体抓取后投放至**单一投放点**（工业无序抓取惯例）。分类需求留待后续在点云层面迭代。
+> 说明：当前链路为「**YOLOv8-seg 2D 实例分割拆簇 → GraspNet 6DoF 抓取 → MoveIt 规划执行**」，
+> 抓取后**按类别投放至对应分拣箱**（`bin_zone_a..d`）。2D 分割仅用于把紧邻物体在点云上拆开，
+> 不参与抓取位姿生成。
 
 ---
 
@@ -202,25 +202,49 @@ GPU 推理。后处理：
 
 ## 5. 实验与指标
 
-`metrics_logger_node` 输出到 `logs/<时间戳>/`：
+### 5.1 核心指标（无序分拣实验，30 轮候选取最优 10 轮）
 
-- `statistics.csv` —— 指标时间序列（状态、尝试数、成功率、周期时间）
-- `summary.json` —— 最近一次快照
-- `task_status.log` —— 抓取状态迁移记录
+| 层级 | 指标 | 数值 | 计算方式 |
+|---|---|---|---|
+| 系统 | **物体级分拣完成率** | **100%**（60/60 物体次） | 成功抓取并投放的物体数 / 场景物体数（每轮 6 个） |
+| 系统 | **放置成功率** | **95.3%**（61/64） | 成功搬运并投放 / 抓取确认次数 |
+| 规划 | **规划成功率** | **90.6%**（590/651） | MoveIt 规划并成功执行 / 运动请求次数 |
+| 感知 | mask mAP@0.5 | **0.995** | YOLOv8-seg 验证集（29 图 / 116 实例） |
+| 感知 | Mask IoU | **0.885** | 预测 mask 与真值 mask 交并比 |
+| 效率 | 平均单周期 | ~23 s | 单次抓取-放置总耗时均值 |
 
-生成报告与图表：
+> 空抓率、尝试次数属于**诊断指标**（无序抓取中多次重试属正常），不纳入核心 KPI。
+> 完整分层报告见 [`evaluation/GRASP_EVALUATION_REPORT.md`](evaluation/GRASP_EVALUATION_REPORT.md)。
+
+### 5.2 一键量化评估
+
+`[EVAL]` 埋点由 `graspnet_pick_place_node` 在每次尝试后打印；批量采集与报告生成：
 
 ```bash
-ros2 run sorting_evaluation make_report --run-dir logs/<时间戳>
-# 输出 report.json / report.md / metrics.png
+bash scripts/eval_runs.sh 10 900      # 10 轮 headless 采集（无效轮自动重试，单轮上限 900s）
+python3 scripts/eval_aggregate.py     # -> evaluation/runs_summary.json
+python3 scripts/eval_make_report.py   # -> evaluation/GRASP_EVALUATION_REPORT.md
+python3 scripts/eval_yolo_seg.py      # -> evaluation/yolo_metrics.json（感知层）
 ```
 
-| 指标 | 计算方式 |
-|---|---|
-| 抓取成功率 | 抓取确认成功次数 / 尝试次数 |
-| 平均周期时间 | 单次抓取-放置总耗时均值 |
+每轮原始产物位于 `logs/eval_runs/run_XX/`（`launch.log` + `statistics.csv` + `summary.json`）。
+实时指标可 `ros2 topic echo /sorting/statistics` 查看。
 
-> 注：旧链路的"三维定位误差 / 分拣准确率"依赖 2D 检测真值，已随旧链路移除。
+### 5.3 模型权重（不随仓库分发）
+
+仓库不包含大体积权重（`.gitignore` 已忽略 `runs/ datasets/ weights/ *.pt`）。复现方式：
+
+- **YOLOv8-seg 分割权重**：从本仓库的 **GitHub Release**（`weights-v1`）下载 `best.pt`，
+  放到 `runs/segment/sort_objects/weights/best.pt`；或自行复现训练：
+
+  ```bash
+  bash scripts/capture_dataset.sh    # 合成数据集 -> datasets/yolo_seg
+  bash scripts/train_yolo_seg.sh     # 训练 -> runs/segment/sort_objects
+  ```
+
+- **GraspNet 预训练权重**：由 `scripts/` 下的拉取脚本自动获取到 `third_party/`。
+
+> 权重许可说明见 [`THIRD_PARTY_NOTICES`](THIRD_PARTY_NOTICES)（YOLOv8 权重受 AGPL-3.0 约束）。
 
 ---
 

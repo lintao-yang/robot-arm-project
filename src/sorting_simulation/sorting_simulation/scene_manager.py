@@ -462,67 +462,99 @@ class SceneManager(Node):
 
         layout = self.scene_cfg.get('layout', {})
         class_ids = self.class_table.class_ids
-        target = max(1, count)
         ncols = max(1, int(layout.get('columns', 2)))
         gap = float(layout.get('gap', 0.0015))
         center_x = float(layout.get('center_x', 0.40))
         center_y = float(layout.get('center_y', 0.0))
         clearance = float(layout.get('rest_clearance', 0.0005))
 
-        picks: List[int] = []
-        if randomize_class:
+        # ---- 类别数量 ----
+        # composition（scene.composition）：严格固定各类别数量（如"有且仅有一个蓝色圆柱体"）。
+        # 仅在未显式要求 randomize_class 时生效；randomize_class=true 时不套用（供数据集采集用）。
+        composition = self.scene_cfg.get('composition')
+        if (not randomize_class) and composition:
+            picks: List[int] = []
+            for class_id, amount in composition.items():
+                picks.extend([int(class_id)] * int(amount))
+            # 数量严格固定，仅打乱摆放顺序
+            self.rng.shuffle(picks)
+            if int(count) and len(picks) != int(count):
+                self.get_logger().warn(
+                    f'composition 共 {len(picks)} 个，与请求 n_objects={int(count)} 不一致，'
+                    '以 composition 为准'
+                )
+        elif randomize_class:
             # 随机类别（可重复）：种类最多样，但可能出现同色相邻
-            picks = [int(self.rng.choice(class_ids)) for _ in range(target)]
+            picks = [int(self.rng.choice(class_ids)) for _ in range(max(1, int(count)))]
         elif randomize_layout:
             # "每种各一个"但**槽位随机排列**：保证各类各一个、无同色相邻，同时让每帧的
             # "类别->槽位"映射不同（配合相机/光照随机化提供帧间多样性，供合成数据集采集）。
             # 网格几何与边界间隙保持不变。
             permutation = [int(cid) for cid in self.rng.permutation(class_ids)]
-            while len(picks) < target:
+            picks = []
+            while len(picks) < max(1, int(count)):
                 picks.extend(permutation)
-            picks = picks[:target]
+            picks = picks[:max(1, int(count))]
         else:
-            picks = [int(class_ids[index % len(class_ids)]) for index in range(target)]
+            picks = [int(class_ids[index % len(class_ids)])
+                     for index in range(max(1, int(count)))]
+
+        target = len(picks)
         sizes = [self.class_table.size_of(cid) for cid in picks]
 
-        nrows = int(math.ceil(target / float(ncols)))
-        col_w = [0.0] * ncols
-        row_h = [0.0] * nrows
-        for index, size in enumerate(sizes):
-            col_w[index % ncols] = max(col_w[index % ncols], size[0])
-            row_h[index // ncols] = max(row_h[index // ncols], size[1])
+        # ---- 摆放：默认"随机散布"（无序抓取），失败时回退紧凑网格 ----
+        placement = str(layout.get('placement', 'scatter')).lower()
+        centers = None
+        if placement == 'scatter':
+            centers = self._sample_scatter_placements(sizes, layout)
+            if centers is None:
+                self.get_logger().warn('随机散布放置失败（面积/间隙不足），回退紧凑网格布局')
+                placement = 'grid'
 
-        total_w = sum(col_w) + gap * (ncols - 1)
-        total_h = sum(row_h) + gap * (nrows - 1)
-        left = center_x - total_w / 2.0
-        top = center_y + total_h / 2.0
+        if centers is None:
+            nrows = int(math.ceil(target / float(ncols)))
+            col_w = [0.0] * ncols
+            row_h = [0.0] * nrows
+            for index, size in enumerate(sizes):
+                col_w[index % ncols] = max(col_w[index % ncols], size[0])
+                row_h[index // ncols] = max(row_h[index // ncols], size[1])
 
-        col_left = []
-        cursor = left
-        for width in col_w:
-            col_left.append(cursor)
-            cursor += width + gap
-        row_top = []
-        cursor = top
-        for height in row_h:
-            row_top.append(cursor)
-            cursor -= height + gap
+            total_w = sum(col_w) + gap * (ncols - 1)
+            total_h = sum(row_h) + gap * (nrows - 1)
+            left = center_x - total_w / 2.0
+            top = center_y + total_h / 2.0
+
+            col_left = []
+            cursor = left
+            for width in col_w:
+                col_left.append(cursor)
+                cursor += width + gap
+            row_top = []
+            cursor = top
+            for height in row_h:
+                row_top.append(cursor)
+                cursor -= height + gap
+
+            centers = []
+            for index in range(target):
+                col = index % ncols
+                row = index // ncols
+                sx, sy, _ = sizes[index]
+                x = (col_left[col] + col_w[col] - sx / 2.0 if col == 0
+                     else col_left[col] + sx / 2.0)
+                y = (row_top[row] - row_h[row] + sy / 2.0 if row == 0
+                     else row_top[row] - sy / 2.0)
+                centers.append((x, y, 0.0))
 
         spawned = 0
         for index, class_id in enumerate(picks):
-            col = index % ncols
-            row = index // ncols
             size = sizes[index]
             sx, sy, sz = size
-
-            x = (col_left[col] + col_w[col] - sx / 2.0 if col == 0
-                 else col_left[col] + sx / 2.0)
-            y = (row_top[row] - row_h[row] + sy / 2.0 if row == 0
-                 else row_top[row] - sy / 2.0)
+            x, y, yaw = centers[index]
 
             name = f'sort_obj_{index}'
             rgba = self._randomized_rgba(class_id)
-            pose = [float(x), float(y), float(sz / 2.0 + clearance), 0.0, 0.0, 0.0]
+            pose = [float(x), float(y), float(sz / 2.0 + clearance), 0.0, 0.0, float(yaw)]
 
             sdf = self._object_sdf(
                 name, self.class_table.shape_of(class_id), size, rgba, pose
@@ -540,10 +572,80 @@ class SceneManager(Node):
             }
             spawned += 1
 
-        self.get_logger().info(
-            f'已按紧凑网格生成 {spawned} 个待分拣物体（边界间距 {gap * 1000:.1f}mm）'
-        )
+        if placement == 'scatter':
+            self.get_logger().info(
+                f'已按随机散布生成 {spawned} 个待分拣物体'
+                f'（最小边界间距 {float(layout.get("min_gap", 0.0)) * 1000:.1f}mm，'
+                f'随机偏航）'
+            )
+        else:
+            self.get_logger().info(
+                f'已按紧凑网格生成 {spawned} 个待分拣物体（边界间距 {gap * 1000:.1f}mm）'
+            )
         return spawned
+
+    # ------------------------------------------------------------------
+    def _sample_scatter_placements(self, sizes, layout):
+        """在工作区 ROI 内采样"互不重叠"的随机位姿（拒绝采样 + OBB 分离轴检测）。
+
+        返回 [(x, y, yaw), ...]（与 sizes 同序）；若某物体在尝试上限内放不下，
+        返回 None，由调用方回退到紧凑网格。物体间最小边界间距由 layout.min_gap 控制
+        （默认 20mm），保证不重叠、不穿模。
+        """
+        # 散布区域：优先用 layout.scatter_region（可达性友好的中心区），未配置则退回工作区 ROI。
+        # 为什么不一上来就用整个 ROI：散布到 ROI 边缘（如 y≈±0.30）时 Panda 的接近姿态
+        # 更吃力，实测规划失败集中于边缘物体；中心区能显著降低"位姿不可达"类失败。
+        roi = self.scene_cfg.get('workspace_roi', {})
+        region = layout.get('scatter_region') or {}
+        x_min = float(region.get('x_min', roi.get('x_min', 0.18)))
+        x_max = float(region.get('x_max', roi.get('x_max', 0.58)))
+        y_min = float(region.get('y_min', roi.get('y_min', -0.34)))
+        y_max = float(region.get('y_max', roi.get('y_max', 0.34)))
+        min_gap = float(layout.get('min_gap', 0.020))
+        random_yaw = bool(layout.get('random_yaw', True))
+
+        placed = []  # [(x, y, yaw, sx, sy)]
+        trials_per_object = 8000
+        for sx, sy, _sz in sizes:
+            for _ in range(trials_per_object):
+                yaw = float(self.rng.uniform(-math.pi, math.pi)) if random_yaw else 0.0
+                # 旋转后外接矩形的半长（用于约束中心范围，保证物体整体落在 ROI 内）
+                ex = (abs(sx * math.cos(yaw)) + abs(sy * math.sin(yaw))) / 2.0
+                ey = (abs(sx * math.sin(yaw)) + abs(sy * math.cos(yaw))) / 2.0
+                if x_min + ex >= x_max - ex or y_min + ey >= y_max - ey:
+                    continue
+                x = float(self.rng.uniform(x_min + ex, x_max - ex))
+                y = float(self.rng.uniform(y_min + ey, y_max - ey))
+                if all(self._rects_separated((x, y, yaw, sx, sy), other, min_gap)
+                       for other in placed):
+                    placed.append((x, y, yaw, sx, sy))
+                    break
+            else:
+                return None
+        return [(x, y, yaw) for x, y, yaw, _sx, _sy in placed]
+
+    @staticmethod
+    def _rects_separated(a, b, min_gap: float) -> bool:
+        """两个（可旋转）矩形是否至少以 min_gap 的间隙分离（OBB 分离轴检测）。
+
+        a/b 均为 (x, y, yaw, sx, sy)。只要存在一条分离轴使间距 >= 半宽之和 + min_gap，
+        即判定"不重叠"；4 条轴（两两矩形各两条）全部不满足才判为重叠。
+        """
+        ax, ay, ayaw, asx, asy = a
+        bx, by, byaw, bsx, bsy = b
+        a_axes = [(math.cos(ayaw), math.sin(ayaw)), (-math.sin(ayaw), math.cos(ayaw))]
+        b_axes = [(math.cos(byaw), math.sin(byaw)), (-math.sin(byaw), math.cos(byaw))]
+        ah = (asx / 2.0, asy / 2.0)
+        bh = (bsx / 2.0, bsy / 2.0)
+        dx, dy = bx - ax, by - ay
+        for lx, ly in a_axes + b_axes:
+            a_proj = (ah[0] * abs(a_axes[0][0] * lx + a_axes[0][1] * ly)
+                      + ah[1] * abs(a_axes[1][0] * lx + a_axes[1][1] * ly))
+            b_proj = (bh[0] * abs(b_axes[0][0] * lx + b_axes[0][1] * ly)
+                      + bh[1] * abs(b_axes[1][0] * lx + b_axes[1][1] * ly))
+            if abs(dx * lx + dy * ly) >= a_proj + b_proj + min_gap:
+                return True
+        return False
 
     # ==================================================================
     # 服务回调

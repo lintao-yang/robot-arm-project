@@ -1,0 +1,30 @@
+{
+  "weights": "/home/yang/robot_sorting_project/runs/segment/sort_objects/weights/best.pt",
+  "data": "/home/yang/robot_sorting_project/datasets/yolo_seg/data.yaml",
+  "split": "val",
+  "val_images": 29,
+  "val_instances": 116,
+  "imgsz": 640,
+  "conf": 0.25,
+  "mAP50_mask": 0.995,
+  "mAP50_95_mask": 0.6067,
+  "precision_mask": 0.9833,
+  "recall_mask": 0.9983,
+  "mAP50_box": 0.995,
+  "n_gt": 116,
+  "n_matched": 116,
+  "detection_rate": 1.0,
+  "mean_iou_matched": 0.8853,
+  "per_class_mean_iou": {
+    "0": 0.8686,
+    "1": 0.8925,
+    "2": 0.8873,
+    "3": 0.8926
+  },
+  "class_names": {
+    "0": "red_cube",
+    "1": "blue_cylinder",
+    "2": "green_bar",
+    "3": "yellow_box"
+  }
+}

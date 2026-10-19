@@ -23,6 +23,13 @@ third_party/
 models/*.pt
 models/*.onnx
 
+# 训练产物 / 数据集 / 预训练权重（体积大，不随仓库分发，见 README 复现说明）
+runs/
+datasets/
+weights/
+*.pt
+*.onnx
+
 # 编辑器/系统
 .vscode/
 .idea/

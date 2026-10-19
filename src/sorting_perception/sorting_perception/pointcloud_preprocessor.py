@@ -343,7 +343,8 @@ class PointCloudPreprocessor(Node):
         dt = (time.perf_counter() - t0) * 1000.0
         if (time.time() - self._last_log) > 1.0:
             self._last_log = time.time()
-            self.get_logger().info(
+            # 逐帧统计改为 debug：默认 INFO 级别不再刷屏（需要时用 --log-level debug 查看）
+            self.get_logger().debug(
                 '原始 %d -> ROI %d -> 去桌面 %d -> 聚类 %d 个 | %.1f ms'
                 % (len(pts), n_roi, n_obj, len(clusters), dt)
             )

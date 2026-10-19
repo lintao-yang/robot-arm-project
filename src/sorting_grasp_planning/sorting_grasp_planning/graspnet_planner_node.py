@@ -94,6 +94,10 @@ class GraspNetPlannerNode(Node):
         self.max_approach_deg = float(gcfg.get('max_approach_deg', 75.0))
         self.accumulate_window = float(gcfg.get('accumulate_window', 3.0))
         self.dedupe_voxel = float(gcfg.get('dedupe_voxel', 0.02))
+        # 场景一移动（物体被夹空碰移 / 被抓走）就清空累积候选池：否则旧位置的候选会在
+        # accumulate_window 秒内继续被发布，下游会"对着已移走的旧位置反复下压"（实测症状）。
+        self.pool_move_tol = float(gcfg.get('pool_move_tol', 0.015))
+        self._prev_centroids = []
         self._pool = []
         min_w = float(cfg['grasp']['min_grasp_width'])
         max_w = float(cfg['grasp']['max_grasp_width'])
@@ -266,6 +270,22 @@ class GraspNetPlannerNode(Node):
         score, width = score[order], width[order]
         world_center, world_rot = world_center[order], world_rot[order]
 
+        # ---- 场景移动检测：任一聚类质心位移超过阈值即清空累积池 ----
+        # 目的：物体被夹空碰移后，旧位置的候选必须立即失效，不能继续累积发布。
+        if self._prev_centroids and self._centroids:
+            cur = np.asarray(self._centroids, dtype=float)
+            prev = np.asarray(self._prev_centroids, dtype=float)
+            nearest = np.linalg.norm(
+                cur[:, None, :] - prev[None, :, :], axis=2).min(axis=1)
+            moved = float(nearest.max())
+            if moved > self.pool_move_tol:
+                self.get_logger().info(
+                    f'[pool] 场景移动 {moved * 1000:.0f}mm > '
+                    f'{self.pool_move_tol * 1000:.0f}mm，清空累积候选池')
+                self._pool = []
+        if self._centroids:
+            self._prev_centroids = list(self._centroids)
+
         # ---- 时序累积 ----
         # 合成场景静止，而 GraspNet 单帧只对部分物体提出抓取（实测约 2/4）。
         # 累积最近若干帧的抓取并按体素去重，可让每个物体都拿到候选。
@@ -305,7 +325,8 @@ class GraspNetPlannerNode(Node):
         self._publish_markers(header, world_center, world_rot, score)
 
         dt = (time.perf_counter() - t0) * 1000.0
-        self.get_logger().info(
+        # 逐帧诊断信息改为 debug：默认 INFO 级别不再刷屏（需要时用 --log-level debug 查看）
+        self.get_logger().debug(
             '原始 %d（吸附 %d 条，平均倾角 %.0f°->0°，重定心均值 %.0fmm）-> 评分/开口 %d '
             '-> 接近角 %d -> 质心 %d -> 发布 Top-%d | 最高分 %.3f | %.0f ms'
             % (n_raw, n_snapped,
