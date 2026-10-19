@@ -234,7 +234,8 @@ python3 scripts/eval_yolo_seg.py      # -> evaluation/yolo_metrics.json（感知
 
 仓库不包含大体积权重（`.gitignore` 已忽略 `runs/ datasets/ weights/ *.pt`）。复现方式：
 
-- **YOLOv8-seg 分割权重**：从本仓库的 **GitHub Release**（`weights-v1`）下载 `best.pt`，
+- **YOLOv8-seg 分割权重**：从本仓库 Release [`weights-v1`](https://github.com/2833045095/robot-arm-project/releases/tag/weights-v1)
+  下载 [`best.pt`](https://github.com/2833045095/robot-arm-project/releases/download/weights-v1/best.pt)，
   放到 `runs/segment/sort_objects/weights/best.pt`；或自行复现训练：
 
   ```bash
